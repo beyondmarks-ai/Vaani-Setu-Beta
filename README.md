@@ -1,19 +1,77 @@
-# vaani_setu
+# Vaani Setu Beta
 
-A new Flutter project.
+Vaani Setu is a Flutter calling prototype that assigns each signed-in user a six-digit Vaani number with the `0209` prefix, then connects users through LiveKit rooms using an Azure-hosted bridge.
 
-## Getting Started
+## Current Stack
 
-This project is a starting point for a Flutter application.
+- Flutter Android app
+- Firebase Auth for email/password sign-in
+- Cloud Firestore for user numbers and call state
+- Firebase Cloud Messaging for background incoming-call fallback
+- Azure Container Apps bridge for call signaling and LiveKit token creation
+- LiveKit for realtime audio rooms
 
-A few resources to get you started if this is your first Flutter project:
+## Local Setup
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+Install Flutter, Node.js, Firebase CLI, and Azure CLI. Then run:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```powershell
+flutter pub get
+cd bridge
+npm install
+cd ..
+```
 
-# Vaani-Setu-V2
+Firebase Android config is expected at:
+
+```text
+android/app/google-services.json
+```
+
+## Build Android
+
+The app has a default bridge URL configured in code. To override it:
+
+```powershell
+flutter build apk --debug --dart-define=BRIDGE_URL=https://your-bridge-url
+```
+
+Default build:
+
+```powershell
+flutter build apk --debug
+```
+
+APK output:
+
+```text
+build/app/outputs/flutter-apk/app-debug.apk
+```
+
+## Azure Bridge
+
+Deploy the bridge from the repo root:
+
+```powershell
+az containerapp up --name vaani-setu-bridge --resource-group <resource-group> --source bridge
+```
+
+Required runtime environment variables are documented in `bridge/.env.azure.example`. Do not commit real API keys, LiveKit secrets, service-account JSON, or JWT secrets.
+
+## Firebase
+
+Deploy Firestore rules:
+
+```powershell
+npx -y firebase-tools@latest deploy --only firestore:rules --project <firebase-project-id>
+```
+
+## Git Hygiene
+
+Ignored locally:
+
+- Flutter and Android build outputs
+- `node_modules`
+- `.env` files
+- Firebase debug logs
+- local Android SDK files

@@ -1,0 +1,170 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function validSuffix(suffix) {
+      return suffix is string && suffix.matches('^[0-9][0-9]$');
+    }
+
+    function validUid(uid) {
+      return uid is string && uid.size() > 0 && uid.size() <= 128;
+    }
+
+    function validEmail(email) {
+      return email is string && email.size() <= 254;
+    }
+
+    function validLanguage(language) {
+      return language is string && language.matches('^[a-z]{2,3}(-[A-Z]{2})?$');
+    }
+
+    function validNumberForSuffix(number, suffix) {
+      return number is string && number == '0209' + suffix;
+    }
+
+    function isParticipant(data) {
+      return isAuthenticated() &&
+        data.participants is list &&
+        data.participants.hasAny([request.auth.uid]);
+    }
+
+    function hasOnlyAllowedUserFields(data) {
+      return data.keys().hasOnly([
+        'uid',
+        'email',
+        'suffix',
+        'number',
+        'createdAt',
+        'updatedAt',
+        'spokenLanguage',
+        'listenLanguage'
+      ]);
+    }
+
+    function hasOnlyAllowedNumberFields(data) {
+      return data.keys().hasOnly([
+        'uid',
+        'suffix',
+        'number',
+        'createdAt'
+      ]);
+    }
+
+    function validPushPlatform(platform) {
+      return platform is string && platform.size() > 0 && platform.size() <= 20;
+    }
+
+    function isValidPushToken(data, userId, tokenId) {
+      return data.keys().hasOnly(['uid', 'token', 'platform', 'createdAt', 'updatedAt']) &&
+        data.keys().hasAll(['uid', 'token', 'platform', 'createdAt', 'updatedAt']) &&
+        validUid(data.uid) &&
+        data.uid == userId &&
+        validUid(tokenId) &&
+        data.token is string && data.token.size() > 0 && data.token.size() <= 512 &&
+        data.token == tokenId &&
+        validPushPlatform(data.platform) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNumberAssignment(data, suffix) {
+      return hasOnlyAllowedNumberFields(data) &&
+        data.keys().hasAll(['uid', 'suffix', 'number', 'createdAt']) &&
+        validUid(data.uid) &&
+        data.uid == request.auth.uid &&
+        validSuffix(data.suffix) &&
+        data.suffix == suffix &&
+        validNumberForSuffix(data.number, data.suffix) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidNewNumberAssignment(data, suffix) {
+      return isValidNumberAssignment(data, suffix) &&
+        data.createdAt == request.time;
+    }
+
+    function matchingNumberAssignmentExists(data) {
+      return existsAfter(/databases/$(database)/documents/numbers/$(data.suffix)) &&
+        getAfter(/databases/$(database)/documents/numbers/$(data.suffix)).data.uid == request.auth.uid &&
+        getAfter(/databases/$(database)/documents/numbers/$(data.suffix)).data.number == data.number;
+    }
+
+    function matchingUserProfileExists(data) {
+      return existsAfter(/databases/$(database)/documents/users/$(data.uid)) &&
+        getAfter(/databases/$(database)/documents/users/$(data.uid)).data.uid == request.auth.uid &&
+        getAfter(/databases/$(database)/documents/users/$(data.uid)).data.suffix == data.suffix &&
+        getAfter(/databases/$(database)/documents/users/$(data.uid)).data.number == data.number;
+    }
+
+    function isValidUser(data, userId) {
+      return hasOnlyAllowedUserFields(data) &&
+        data.keys().hasAll(['uid', 'email', 'suffix', 'number', 'createdAt', 'updatedAt', 'spokenLanguage', 'listenLanguage']) &&
+        validUid(data.uid) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        validEmail(data.email) &&
+        validSuffix(data.suffix) &&
+        validNumberForSuffix(data.number, data.suffix) &&
+        validLanguage(data.spokenLanguage) &&
+        validLanguage(data.listenLanguage) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNewUser(data, userId) {
+      return isValidUser(data, userId) &&
+        data.createdAt == request.time &&
+        data.updatedAt == request.time &&
+        matchingNumberAssignmentExists(data);
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidNewUser(request.resource.data, userId);
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /users/{userId}/pushTokens/{tokenId} {
+      allow get, list: if false;
+      allow create: if isOwner(userId) && isValidPushToken(request.resource.data, userId, tokenId) && request.resource.data.createdAt == request.time && request.resource.data.updatedAt == request.time;
+      allow update: if isOwner(userId) && isValidPushToken(request.resource.data, userId, tokenId);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/incomingCalls/{callId} {
+      allow get, list: if isOwner(userId);
+      allow create, update, delete: if false;
+    }
+
+    match /numbers/{suffix} {
+      allow get: if isAuthenticated();
+      allow list: if false;
+      allow create: if isAuthenticated() &&
+        !exists(/databases/$(database)/documents/numbers/$(suffix)) &&
+        isValidNewNumberAssignment(request.resource.data, suffix) &&
+        matchingUserProfileExists(request.resource.data);
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /calls/{callId} {
+      allow get, list: if isParticipant(resource.data);
+      allow create, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
+
+

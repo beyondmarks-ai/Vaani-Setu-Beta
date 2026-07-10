@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "519562892427",
+    "project_id": "vaani-setu-4afa4",
+    "storage_bucket": "vaani-setu-4afa4.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:519562892427:android:ec8713fd22dbc24941b08e",
+        "android_client_info": {
+          "package_name": "com.example.vaani_setu"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDJdjFGqnwzu_7bEIdLkoEw7f3b2DJIHUQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
