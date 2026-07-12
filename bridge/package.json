@@ -1,0 +1,22 @@
+{
+  "name": "vaani-setu-bridge",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "lint": "node --check src/server.js && node --check src/openaiRealtime.js"
+  },
+  "dependencies": {
+    "@azure/data-tables": "^13.3.2",
+    "@azure/web-pubsub": "^1.2.0",
+    "@roamhq/wrtc": "^0.8.0",
+    "express": "^5.1.0",
+    "firebase-admin": "^13.6.0",
+    "jsonwebtoken": "^9.0.2",
+    "livekit-server-sdk": "^2.17.0",
+    "ws": "^8.18.3"
+  }
+}

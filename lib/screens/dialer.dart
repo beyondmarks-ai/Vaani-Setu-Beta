@@ -1,118 +1,158 @@
+import '../services/azure_auth_service.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter/services.dart';
 
+import '../services/call_service.dart';
+import '../services/number_assignment_service.dart';
 import 'call_screen.dart';
 
 class DialerScreen extends StatefulWidget {
-  const DialerScreen({super.key});
+  const DialerScreen({super.key, required this.profile});
+
+  final UserNumberProfile profile;
 
   @override
   State<DialerScreen> createState() => _DialerScreenState();
 }
 
 class _DialerScreenState extends State<DialerScreen> {
-  String _number = '';
-  String _status = 'Ready';
-  MediaStream? _localStream;
+  final _numberService = NumberAssignmentService();
+  final _callService = CallService();
 
-  Future<MediaStream?> _prepareAudio() async {
-    final microphone = await Permission.microphone.request();
-    final camera = await Permission.camera.request();
-    await Permission.contacts.request();
+  String _targetSuffix = '';
+  String _status = 'Enter the last 2 digits to call';
+  bool _checkingNumber = false;
 
-    if (!microphone.isGranted) {
-      setState(() => _status = 'Microphone permission required');
-      return null;
-    }
-
-    if (_localStream != null) {
-      return _localStream;
-    }
-
-    _localStream = await navigator.mediaDevices.getUserMedia({
-      'audio': true,
-      'video': camera.isGranted,
-    });
-
-    return _localStream;
-  }
+  String get _targetNumber => '${NumberAssignmentService.prefix}$_targetSuffix';
 
   Future<void> _startCall() async {
-    if (_number.isEmpty) {
-      setState(() => _status = 'Enter a number first');
+    if (_targetSuffix.length != 2) {
+      setState(
+        () =>
+            _status = 'Enter 2 digits after ${NumberAssignmentService.prefix}',
+      );
+      return;
+    }
+
+    if (_targetSuffix == widget.profile.suffix) {
+      setState(() => _status = 'You cannot call your own number');
       return;
     }
 
     try {
-      setState(() => _status = 'Preparing audio...');
-      final stream = await _prepareAudio();
+      setState(() {
+        _checkingNumber = true;
+        _status = 'Checking $_targetNumber...';
+      });
 
-      if (!mounted || stream == null) {
+      final target = await _numberService.findBySuffix(_targetSuffix);
+      if (!mounted) return;
+
+      if (target == null) {
+        setState(() {
+          _checkingNumber = false;
+          _status = 'No user has $_targetNumber yet';
+        });
         return;
       }
 
+      setState(() => _status = 'Calling $_targetNumber...');
+      final joinInfo = await _callService.createCall(_targetSuffix);
+      if (!mounted) return;
+
       setState(() {
-        _status = 'Opening call screen';
+        _checkingNumber = false;
+        _status = 'Enter the last 2 digits to call';
       });
 
-      final callNumber = _number;
-      _localStream = null;
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => CallScreen(number: callNumber, localStream: stream),
+          builder: (_) => CallScreen(
+            callId: joinInfo.roomName,
+            remoteNumber: target.number,
+            joinInfo: joinInfo,
+          ),
         ),
       );
-
+    } catch (error) {
       if (mounted) {
-        setState(() => _status = 'Ready');
+        setState(() {
+          _checkingNumber = false;
+          _status = _friendlyError(error);
+        });
       }
-    } catch (_) {
-      setState(() => _status = 'Could not start local audio');
     }
   }
 
-  void _addDigit(String digit) {
-    setState(() {
-      _number += digit;
-      _status = 'Ready';
-    });
+  String _friendlyError(Object error) {
+    final message = error.toString();
+    if (message.contains('not-found')) return 'No user has $_targetNumber yet';
+    if (message.contains('permission-denied')) return 'Call permission denied';
+    return message.replaceFirst('Bad state: ', '');
   }
 
-  void _deleteDigit() {
-    if (_number.isEmpty) {
+  void _addDigit(String digit) {
+    if (_targetSuffix.length >= 2) {
+      HapticFeedback.selectionClick();
+      setState(() => _status = 'Only 2 digits are needed');
       return;
     }
 
     setState(() {
-      _number = _number.substring(0, _number.length - 1);
-      _status = 'Ready';
+      _targetSuffix += digit;
+      _status = _targetSuffix.length == 2
+          ? 'Ready to call $_targetNumber'
+          : 'Enter 1 more digit';
+    });
+  }
+
+  void _deleteDigit() {
+    if (_targetSuffix.isEmpty) return;
+
+    setState(() {
+      _targetSuffix = _targetSuffix.substring(0, _targetSuffix.length - 1);
+      _status = _targetSuffix.isEmpty
+          ? 'Enter the last 2 digits to call'
+          : 'Enter 1 more digit';
     });
   }
 
   void _clearNumber() {
     setState(() {
-      _number = '';
-      _status = 'Ready';
+      _targetSuffix = '';
+      _status = 'Enter the last 2 digits to call';
     });
   }
 
-  @override
-  void dispose() {
-    _localStream?.dispose();
-    super.dispose();
+  Future<void> _signOut() async {
+    await AzureAuthService.instance.signOut();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Vaani Setu')),
+      appBar: AppBar(
+        title: const Text('Vaani Setu'),
+        actions: [
+          IconButton(
+            tooltip: 'Sign out',
+            onPressed: _signOut,
+            icon: const Icon(Icons.logout),
+          ),
+        ],
+      ),
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
           child: Column(
             children: [
-              _NumberDisplay(number: _number, status: _status),
+              _OwnNumberCard(profile: widget.profile),
+              const SizedBox(height: 14),
+              _NumberDisplay(
+                prefix: NumberAssignmentService.prefix,
+                suffix: _targetSuffix,
+                status: _status,
+              ),
               const SizedBox(height: 22),
               Expanded(child: _DialPad(onDigitPressed: _addDigit)),
               const SizedBox(height: 16),
@@ -122,25 +162,33 @@ class _DialerScreenState extends State<DialerScreen> {
                   _ActionButton(
                     icon: Icons.close,
                     tooltip: 'Clear',
-                    onPressed: _number.isEmpty ? null : _clearNumber,
+                    onPressed: _targetSuffix.isEmpty ? null : _clearNumber,
                   ),
                   const SizedBox(width: 20),
                   SizedBox.square(
                     dimension: 72,
                     child: FilledButton(
-                      onPressed: _startCall,
+                      onPressed: _targetSuffix.length == 2 && !_checkingNumber
+                          ? _startCall
+                          : null,
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF12834C),
+                        disabledBackgroundColor: const Color(0xFFB9C7C2),
                         shape: const CircleBorder(),
                       ),
-                      child: const Icon(Icons.call, size: 30),
+                      child: _checkingNumber
+                          ? const SizedBox.square(
+                              dimension: 24,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.call, size: 30),
                     ),
                   ),
                   const SizedBox(width: 20),
                   _ActionButton(
                     icon: Icons.backspace_outlined,
                     tooltip: 'Delete',
-                    onPressed: _number.isEmpty ? null : _deleteDigit,
+                    onPressed: _targetSuffix.isEmpty ? null : _deleteDigit,
                   ),
                 ],
               ),
@@ -152,14 +200,82 @@ class _DialerScreenState extends State<DialerScreen> {
   }
 }
 
-class _NumberDisplay extends StatelessWidget {
-  const _NumberDisplay({required this.number, required this.status});
+class _OwnNumberCard extends StatelessWidget {
+  const _OwnNumberCard({required this.profile});
 
-  final String number;
+  final UserNumberProfile profile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE7F4F0),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFC2DDD6)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.badge_outlined, color: Color(0xFF0F766E)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Your number',
+                  style: TextStyle(
+                    color: Color(0xFF687570),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                Text(
+                  profile.number,
+                  style: const TextStyle(
+                    color: Color(0xFF12332F),
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (profile.email.isNotEmpty)
+            Flexible(
+              child: Text(
+                profile.email,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  color: Color(0xFF687570),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NumberDisplay extends StatelessWidget {
+  const _NumberDisplay({
+    required this.prefix,
+    required this.suffix,
+    required this.status,
+  });
+
+  final String prefix;
+  final String suffix;
   final String status;
 
   @override
   Widget build(BuildContext context) {
+    final missingDigits = 2 - suffix.length;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
@@ -170,16 +286,30 @@ class _NumberDisplay extends StatelessWidget {
       ),
       child: Column(
         children: [
-          Text(
-            number.isEmpty ? 'Enter phone number' : number,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: number.isEmpty
-                  ? const Color(0xFF77817D)
-                  : const Color(0xFF12332F),
-              fontSize: number.length > 14 ? 24 : 30,
-              fontWeight: FontWeight.w800,
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(text: prefix),
+                  TextSpan(
+                    text: suffix,
+                    style: const TextStyle(color: Color(0xFF12834C)),
+                  ),
+                  if (missingDigits > 0)
+                    TextSpan(
+                      text: '_' * missingDigits,
+                      style: const TextStyle(color: Color(0xFF9AA6A1)),
+                    ),
+                ],
+              ),
+              maxLines: 1,
+              style: const TextStyle(
+                color: Color(0xFF12332F),
+                fontSize: 34,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 0,
+              ),
             ),
           ),
           const SizedBox(height: 8),
@@ -256,13 +386,13 @@ class _DialKey extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
-      elevation: 2,
+      color: data.value.isEmpty ? Colors.transparent : Colors.white,
+      elevation: data.value.isEmpty ? 0 : 2,
       shadowColor: const Color(0x18000000),
       shape: const CircleBorder(),
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: () => onPressed(data.value),
+        onTap: data.value.isEmpty ? null : () => onPressed(data.value),
         child: Center(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -335,7 +465,7 @@ const _dialKeys = [
   _DialKeyData('7', 'PQRS'),
   _DialKeyData('8', 'TUV'),
   _DialKeyData('9', 'WXYZ'),
-  _DialKeyData('*', ''),
+  _DialKeyData('', ''),
   _DialKeyData('0', '+'),
-  _DialKeyData('#', ''),
+  _DialKeyData('', ''),
 ];
