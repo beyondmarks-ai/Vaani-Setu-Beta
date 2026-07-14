@@ -13,6 +13,11 @@ import {
 } from "@livekit/rtc-node";
 import { AccessToken } from "livekit-server-sdk";
 import * as speechsdk from "microsoft-cognitiveservices-speech-sdk";
+import {
+  BUILT_IN_PROTECTED_TERMS,
+  ColloquialPostEditor,
+  normalizeProtectedTerms,
+} from "./colloquialPostEditor.js";
 
 const LIVEKIT_RATE = 48000;
 const SPEECH_INPUT_RATE = Number(process.env.AZURE_SPEECH_INPUT_RATE || 16000);
@@ -214,7 +219,7 @@ async function createBotToken({ apiKey, apiSecret, roomName, identity }) {
 }
 
 class DirectionPipeline {
-  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, speechKey, speechRegion, shouldSuppressEcho, onOutput }) {
+  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, speechKey, speechRegion, protectedTerms, shouldSuppressEcho, onOutput }) {
     this.callId = callId;
     this.label = label;
     this.outputSource = outputSource;
@@ -222,6 +227,8 @@ class DirectionPipeline {
     this.speechRegion = speechRegion;
     this.shouldSuppressEcho = shouldSuppressEcho;
     this.onOutput = onOutput;
+    this.protectedTerms = normalizeProtectedTerms(protectedTerms);
+    this.postEditor = new ColloquialPostEditor();
     this.sourceLanguage = code(sourceLanguage);
     this.targetLanguage = code(outputLanguage);
     this.voice = voice || "alloy";
@@ -241,6 +248,9 @@ class DirectionPipeline {
     this.lastSourceText = "";
     this.lastTranslatedText = "";
     this.lastError = "";
+    this.lastPostEditReason = "";
+    this.lastPostEditLatencyMs = 0;
+    this.processingChain = Promise.resolve();
     this.outputChain = Promise.resolve();
   }
 
@@ -255,6 +265,12 @@ class DirectionPipeline {
     translationConfig.outputFormat = speechsdk.OutputFormat.Simple;
 
     this.recognizer = new speechsdk.TranslationRecognizer(translationConfig, audioConfig);
+    const phraseList = speechsdk.PhraseListGrammar.fromRecognizer(this.recognizer);
+    phraseList.addPhrases(normalizeProtectedTerms([
+      ...BUILT_IN_PROTECTED_TERMS,
+      ...this.protectedTerms,
+    ]));
+    phraseList.setWeight(1.5);
     this.recognizer.recognizing = (_sender, event) => this.handleRecognizing(event);
     this.recognizer.recognized = (_sender, event) => this.handleRecognized(event);
     this.recognizer.canceled = (_sender, event) => this.handleCanceled(event);
@@ -293,13 +309,34 @@ class DirectionPipeline {
     this.lastRecognizedAt = Date.now();
     this.lastSourceText = sourceText;
 
-    this.lastTranslatedText = directTranslation;
-    this.state = "synthesizing";
-    console.log(`Azure Speech translated ${this.callId}/${this.label}:`, {
-      source: sourceText,
-      translated: directTranslation,
-    });
-    this.queueSynthesis(directTranslation);
+    this.processingChain = this.processingChain
+      .then(async () => {
+        if (!this.active) return;
+        this.state = "post-editing";
+        const edited = await this.postEditor.edit({
+          sourceLanguage: this.sourceLanguage,
+          targetLanguage: this.targetLanguage,
+          sourceText,
+          directTranslation,
+          protectedTerms: this.protectedTerms,
+        });
+        if (!this.active) return;
+        this.lastTranslatedText = edited.text;
+        this.lastPostEditReason = edited.reason;
+        this.lastPostEditLatencyMs = edited.latencyMs;
+        this.state = "synthesizing";
+        console.log(`Azure Speech translation ready ${this.callId}/${this.label}`, {
+          postEdit: edited.reason,
+          latencyMs: edited.latencyMs,
+        });
+        this.queueSynthesis(edited.text);
+      })
+      .catch((error) => {
+        this.lastError = error.message || String(error);
+        this.lastPostEditReason = "pipeline-error";
+        console.error(`Colloquial translation processing failed ${this.callId}/${this.label}`, error);
+        if (this.active) this.queueSynthesis(directTranslation);
+      });
   }
   handleCanceled(event) {
     this.state = "failed";
@@ -360,6 +397,7 @@ class DirectionPipeline {
     try {
       if (this.recognizer) await stopContinuousRecognition(this.recognizer);
       this.recognizer?.close();
+      await this.processingChain;
       await this.outputChain;
       this.inputResampler.close();
       this.outputResampler.close();
@@ -383,6 +421,9 @@ class DirectionPipeline {
       lastOutputAt: this.lastOutputAt,
       lastSourceText: this.lastSourceText,
       lastTranslatedText: this.lastTranslatedText,
+      lastPostEditReason: this.lastPostEditReason,
+      lastPostEditLatencyMs: this.lastPostEditLatencyMs,
+      postEditor: this.postEditor.status(),
       lastError: this.lastError,
     };
   }
@@ -403,6 +444,10 @@ class LiveKitTranslationSession {
     this.lastError = "";
     this.streamReaders = new Map();
     this.recentDeliveredAudio = new Map();
+    const protectedTerms = normalizeProtectedTerms([
+      ...(call.callerProtectedTerms || []),
+      ...(call.calleeProtectedTerms || []),
+    ]);
 
     this.toCallerSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
     this.toCalleeSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
@@ -418,6 +463,7 @@ class LiveKitTranslationSession {
       outputSource: this.toCalleeSource,
       speechKey: this.speechKey,
       speechRegion: this.speechRegion,
+      protectedTerms,
       shouldSuppressEcho: (text) => this.isRecentEcho(call.callerUid, text),
       onOutput: (text) => this.rememberDeliveredAudio(call.calleeUid, text),
     });
@@ -430,6 +476,7 @@ class LiveKitTranslationSession {
       outputSource: this.toCallerSource,
       speechKey: this.speechKey,
       speechRegion: this.speechRegion,
+      protectedTerms,
       shouldSuppressEcho: (text) => this.isRecentEcho(call.calleeUid, text),
       onOutput: (text) => this.rememberDeliveredAudio(call.callerUid, text),
     });
@@ -559,7 +606,7 @@ class LiveKitTranslationSession {
   status() {
     return {
       active: this.active,
-      provider: "azure-speech-translation",
+      provider: "azure-speech-colloquial",
       participant: this.identity,
       streamReaders: this.streamReaders.size,
       lastError: this.lastError,
@@ -576,6 +623,7 @@ export class TranslationManager {
     this.apiSecret = apiSecret;
     this.speechKey = speechKey;
     this.speechRegion = speechRegion;
+    this.postEditorConfigured = new ColloquialPostEditor().configured;
     this.sessions = new Map();
   }
 
@@ -618,9 +666,10 @@ export class TranslationManager {
   status(callId) {
     if (callId) return this.sessions.get(callId)?.status() || { active: false };
     return {
-      provider: "azure-speech-translation",
+      provider: "azure-speech-colloquial",
       activeSessions: this.sessions.size,
       configured: Boolean(this.speechKey && this.speechRegion),
+      colloquialConfigured: this.postEditorConfigured,
       calls: Array.from(this.sessions.keys()),
     };
   }

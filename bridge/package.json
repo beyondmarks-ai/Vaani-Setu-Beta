@@ -7,7 +7,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "lint": "node --check src/server.js && node --check src/openaiRealtime.js && node --check src/livekitTranslation.js"
+    "lint": "node --check src/server.js && node --check src/openaiRealtime.js && node --check src/colloquialPostEditor.js && node --check src/livekitTranslation.js",
+    "test": "node test/colloquialPostEditor.test.js"
   },
   "dependencies": {
     "@azure/data-tables": "^13.3.2",

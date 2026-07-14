@@ -40,11 +40,15 @@ class TranslationOptions {
     required this.languages,
     required this.voices,
     required this.defaultVoice,
+    this.protectedTermsLimit = 25,
+    this.protectedTermMaxLength = 40,
   });
 
   final List<TranslationLanguage> languages;
   final List<TranslationVoice> voices;
   final String defaultVoice;
+  final int protectedTermsLimit;
+  final int protectedTermMaxLength;
 
   factory TranslationOptions.fromMap(Map<String, dynamic> data) {
     return TranslationOptions(
@@ -57,6 +61,8 @@ class TranslationOptions {
           .map(TranslationVoice.fromMap)
           .toList(),
       defaultVoice: data['defaultVoice'] as String? ?? 'en-IN-NeerjaNeural',
+      protectedTermsLimit: data['protectedTermsLimit'] as int? ?? 25,
+      protectedTermMaxLength: data['protectedTermMaxLength'] as int? ?? 40,
     );
   }
 }

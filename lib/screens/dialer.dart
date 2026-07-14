@@ -23,7 +23,6 @@ class _DialerScreenState extends State<DialerScreen> {
   String _targetSuffix = '';
   String _status = 'Enter the last 2 digits to call';
   bool _checkingNumber = false;
-  bool _savingSettings = false;
 
   UserNumberProfile get _profile =>
       AzureAuthService.instance.profile ?? widget.profile;
@@ -139,6 +138,10 @@ class _DialerScreenState extends State<DialerScreen> {
     var spokenLanguage = _profile.spokenLanguage;
     var listenLanguage = _profile.listenLanguage;
     var preferredVoice = _profile.preferredVoice;
+    var protectedTerms = List<String>.from(_profile.protectedTerms);
+    var glossaryError = '';
+    var savingSettings = false;
+    final termController = TextEditingController();
     final languageCodes = options.languages.map((item) => item.code).toSet();
     if (!languageCodes.contains(spokenLanguage)) spokenLanguage = 'en';
     if (!languageCodes.contains(listenLanguage)) listenLanguage = 'en';
@@ -155,29 +158,71 @@ class _DialerScreenState extends State<DialerScreen> {
       builder: (context) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
+            void addProtectedTerm() {
+              final term = termController.text
+                  .replaceAll(RegExp(r'\s+'), ' ')
+                  .trim();
+              if (term.isEmpty) return;
+              if (term.length > options.protectedTermMaxLength ||
+                  !RegExp(
+                    r'^[A-Za-z0-9][A-Za-z0-9 ._+\-/#&()]*$',
+                  ).hasMatch(term)) {
+                setSheetState(() {
+                  glossaryError =
+                      'Use a short English name, acronym, or product term';
+                });
+                return;
+              }
+              if (protectedTerms.length >= options.protectedTermsLimit) {
+                setSheetState(() {
+                  glossaryError =
+                      'Maximum ${options.protectedTermsLimit} terms';
+                });
+                return;
+              }
+              if (protectedTerms.any(
+                (item) => item.toLowerCase() == term.toLowerCase(),
+              )) {
+                setSheetState(
+                  () => glossaryError = 'That term is already added',
+                );
+                return;
+              }
+              setSheetState(() {
+                protectedTerms = [...protectedTerms, term];
+                glossaryError = '';
+                termController.clear();
+              });
+            }
+
             Future<void> save() async {
-              setSheetState(() => _savingSettings = true);
+              setSheetState(() {
+                savingSettings = true;
+                glossaryError = '';
+              });
               try {
                 await AzureAuthService.instance.updateProfile(
                   spokenLanguage: spokenLanguage,
                   listenLanguage: listenLanguage,
                   preferredVoice: preferredVoice,
+                  protectedTerms: protectedTerms,
                 );
                 if (context.mounted) Navigator.of(context).pop();
                 if (mounted) {
                   setState(() => _status = 'Translation preferences saved');
                 }
               } catch (error) {
-                if (mounted) {
-                  setState(() => _status = _friendlyError(error));
+                if (context.mounted) {
+                  setSheetState(() {
+                    savingSettings = false;
+                    glossaryError = _friendlyError(error);
+                  });
                 }
-              } finally {
-                if (mounted) setState(() => _savingSettings = false);
               }
             }
 
             return SafeArea(
-              child: Padding(
+              child: SingleChildScrollView(
                 padding: EdgeInsets.fromLTRB(
                   20,
                   4,
@@ -268,10 +313,58 @@ class _DialerScreenState extends State<DialerScreen> {
                         }
                       },
                     ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: termController,
+                      maxLength: options.protectedTermMaxLength,
+                      textCapitalization: TextCapitalization.words,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(
+                          RegExp(r'[A-Za-z0-9 ._+\-/#&()]'),
+                        ),
+                      ],
+                      onSubmitted: (_) => addProtectedTerm(),
+                      decoration: InputDecoration(
+                        labelText:
+                            'English terms (${protectedTerms.length}/${options.protectedTermsLimit})',
+                        prefixIcon: const Icon(Icons.spellcheck_outlined),
+                        suffixIcon: IconButton(
+                          tooltip: 'Add term',
+                          onPressed: addProtectedTerm,
+                          icon: const Icon(Icons.add),
+                        ),
+                        errorText: glossaryError.isEmpty ? null : glossaryError,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                    ),
+                    if (protectedTerms.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: protectedTerms
+                            .map(
+                              (term) => InputChip(
+                                label: Text(term),
+                                onDeleted: () {
+                                  setSheetState(() {
+                                    protectedTerms = protectedTerms
+                                        .where((item) => item != term)
+                                        .toList();
+                                    glossaryError = '';
+                                  });
+                                },
+                              ),
+                            )
+                            .toList(),
+                      ),
+                    ],
                     const SizedBox(height: 18),
                     FilledButton.icon(
-                      onPressed: _savingSettings ? null : save,
-                      icon: _savingSettings
+                      onPressed: savingSettings ? null : save,
+                      icon: savingSettings
                           ? const SizedBox.square(
                               dimension: 18,
                               child: CircularProgressIndicator(strokeWidth: 2),
@@ -287,6 +380,7 @@ class _DialerScreenState extends State<DialerScreen> {
         );
       },
     );
+    termController.dispose();
   }
 
   Future<TranslationOptions> _loadTranslationOptions() async {

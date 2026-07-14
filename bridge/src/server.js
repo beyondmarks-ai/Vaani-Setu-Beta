@@ -15,6 +15,8 @@ app.use(express.json({ limit: "2mb" }));
 const onlineClients = new Map();
 const PORT = process.env.PORT || 8080;
 const DEFAULT_LANGUAGE = "en";
+const PROTECTED_TERMS_LIMIT = 25;
+const PROTECTED_TERM_MAX_LENGTH = 40;
 const CALL_TIMEOUT_MS = 60 * 1000;
 const LIVEKIT_URL = process.env.LIVEKIT_URL || "";
 const LIVEKIT_API_KEY = process.env.LIVEKIT_API_KEY || "";
@@ -322,10 +324,12 @@ function ignoreConflict(error) {
 }
 
 function serializeCall(call) {
-  const { participants, ...entity } = call;
+  const { participants, callerProtectedTerms, calleeProtectedTerms, ...entity } = call;
   return {
     ...entity,
     participantsJson: json(participants || []),
+    callerProtectedTermsJson: json(callerProtectedTerms || []),
+    calleeProtectedTermsJson: json(calleeProtectedTerms || []),
   };
 }
 
@@ -334,6 +338,8 @@ function deserializeCall(entity) {
     ...entity,
     callId: entity.callId || entity.rowKey,
     participants: parseJson(entity.participantsJson, []),
+    callerProtectedTerms: parseJson(entity.callerProtectedTermsJson, []),
+    calleeProtectedTerms: parseJson(entity.calleeProtectedTermsJson, []),
   };
 }
 
@@ -374,6 +380,33 @@ function cleanVoice(value) {
   return voice;
 }
 
+function cleanProtectedTerms(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throwHttp(400, "Protected terms must be a list.");
+  if (value.length > PROTECTED_TERMS_LIMIT) {
+    throwHttp(400, `Use at most ${PROTECTED_TERMS_LIMIT} protected terms.`);
+  }
+
+  const terms = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== "string") throwHttp(400, "Each protected term must be text.");
+    const term = item.replace(/\s+/g, " ").trim();
+    if (!term || term.length > PROTECTED_TERM_MAX_LENGTH) {
+      throwHttp(400, `Protected terms must be 1-${PROTECTED_TERM_MAX_LENGTH} characters.`);
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._+\-\/#&()]*$/.test(term)) {
+      throwHttp(400, "Protected terms can use English letters, numbers, spaces, and common name punctuation.");
+    }
+    const key = term.toLocaleLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      terms.push(term);
+    }
+  }
+  return terms;
+}
+
 function throwHttp(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -399,6 +432,7 @@ function publicProfile(user) {
     spokenLanguage: user.spokenLanguage || DEFAULT_LANGUAGE,
     listenLanguage: user.listenLanguage || DEFAULT_LANGUAGE,
     preferredVoice: user.preferredVoice || DEFAULT_VOICE,
+    protectedTerms: parseJson(user.protectedTermsJson, []),
   };
 }
 
@@ -573,7 +607,7 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "direct-translation-20260714-1",
+    build: "colloquial-translation-20260714-1",
     activeCalls: translationManager.status().activeSessions,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",
@@ -583,6 +617,7 @@ app.get("/health", (_req, res) => {
     translation: true,
     translationProvider: translationManager.status().provider,
     speechConfigured: translationManager.status().configured,
+    colloquialConfigured: translationManager.status().colloquialConfigured,
   });
 });
 
@@ -606,6 +641,7 @@ app.post("/api/auth/register", async (req, res, next) => {
       spokenLanguage: DEFAULT_LANGUAGE,
       listenLanguage: DEFAULT_LANGUAGE,
       preferredVoice: DEFAULT_VOICE,
+      protectedTermsJson: json([]),
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -644,6 +680,11 @@ app.patch("/api/me", async (req, res, next) => {
       spokenLanguage: cleanLanguage(req.body?.spokenLanguage, "spoken language"),
       listenLanguage: cleanLanguage(req.body?.listenLanguage, "listening language"),
       preferredVoice: cleanVoice(req.body?.preferredVoice),
+      protectedTermsJson: json(
+        cleanProtectedTerms(
+          req.body?.protectedTerms ?? parseJson(user.protectedTermsJson, []),
+        ),
+      ),
     };
     const updated = await store.updateUser(user.uid, updates);
     if (!updated) throwHttp(404, "User not found.");
@@ -656,7 +697,13 @@ app.patch("/api/me", async (req, res, next) => {
 app.get("/api/translation/options", async (req, res, next) => {
   try {
     await requireUser(req);
-    res.json({ languages: SUPPORTED_LANGUAGES, voices: SUPPORTED_VOICES, defaultVoice: DEFAULT_VOICE });
+    res.json({
+      languages: SUPPORTED_LANGUAGES,
+      voices: SUPPORTED_VOICES,
+      defaultVoice: DEFAULT_VOICE,
+      protectedTermsLimit: PROTECTED_TERMS_LIMIT,
+      protectedTermMaxLength: PROTECTED_TERM_MAX_LENGTH,
+    });
   } catch (error) {
     next(error);
   }
@@ -729,6 +776,8 @@ app.post("/api/calls", async (req, res, next) => {
       calleeListenLanguage: callee.listenLanguage || DEFAULT_LANGUAGE,
       callerVoice: caller.preferredVoice || DEFAULT_VOICE,
       calleeVoice: callee.preferredVoice || DEFAULT_VOICE,
+      callerProtectedTerms: parseJson(caller.protectedTermsJson, []),
+      calleeProtectedTerms: parseJson(callee.protectedTermsJson, []),
       status: "ringing",
       createdAt: nowIso(),
       updatedAt: nowIso(),

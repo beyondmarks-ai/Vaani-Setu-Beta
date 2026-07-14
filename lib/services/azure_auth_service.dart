@@ -132,11 +132,13 @@ class AzureAuthService {
     required String spokenLanguage,
     required String listenLanguage,
     required String preferredVoice,
+    required List<String> protectedTerms,
   }) async {
     final body = await authorizedPatch('/api/me', {
       'spokenLanguage': spokenLanguage,
       'listenLanguage': listenLanguage,
       'preferredVoice': preferredVoice,
+      'protectedTerms': protectedTerms,
     });
     final profile = UserNumberProfile.fromMap(
       body['profile'] as Map<String, dynamic>? ?? <String, dynamic>{},

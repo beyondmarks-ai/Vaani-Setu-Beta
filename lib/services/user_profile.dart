@@ -7,6 +7,7 @@ class UserNumberProfile {
     required this.spokenLanguage,
     required this.listenLanguage,
     required this.preferredVoice,
+    this.protectedTerms = const [],
   });
 
   final String uid;
@@ -16,6 +17,7 @@ class UserNumberProfile {
   final String spokenLanguage;
   final String listenLanguage;
   final String preferredVoice;
+  final List<String> protectedTerms;
 
   factory UserNumberProfile.fromMap(Map<String, dynamic> data) {
     return UserNumberProfile(
@@ -26,6 +28,9 @@ class UserNumberProfile {
       spokenLanguage: data['spokenLanguage'] as String? ?? 'en',
       listenLanguage: data['listenLanguage'] as String? ?? 'en',
       preferredVoice: data['preferredVoice'] as String? ?? 'en-IN-NeerjaNeural',
+      protectedTerms: (data['protectedTerms'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
     );
   }
 
@@ -38,6 +43,7 @@ class UserNumberProfile {
       'spokenLanguage': spokenLanguage,
       'listenLanguage': listenLanguage,
       'preferredVoice': preferredVoice,
+      'protectedTerms': protectedTerms,
     };
   }
 
@@ -45,6 +51,7 @@ class UserNumberProfile {
     String? spokenLanguage,
     String? listenLanguage,
     String? preferredVoice,
+    List<String>? protectedTerms,
   }) {
     return UserNumberProfile(
       uid: uid,
@@ -54,6 +61,7 @@ class UserNumberProfile {
       spokenLanguage: spokenLanguage ?? this.spokenLanguage,
       listenLanguage: listenLanguage ?? this.listenLanguage,
       preferredVoice: preferredVoice ?? this.preferredVoice,
+      protectedTerms: protectedTerms ?? this.protectedTerms,
     );
   }
 }
