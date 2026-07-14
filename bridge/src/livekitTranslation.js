@@ -23,29 +23,33 @@ const MAX_TTS_CHARS = Number(process.env.TRANSLATION_MAX_TTS_CHARS || 260);
 
 const LANGUAGE_LOCALES = {
   en: "en-IN",
+  as: "as-IN",
+  bn: "bn-IN",
+  gu: "gu-IN",
   hi: "hi-IN",
-  te: "te-IN",
-  ta: "ta-IN",
   kn: "kn-IN",
   ml: "ml-IN",
   mr: "mr-IN",
-  bn: "bn-IN",
-  gu: "gu-IN",
+  or: "or-IN",
   pa: "pa-IN",
+  ta: "ta-IN",
+  te: "te-IN",
   ur: "ur-IN",
 };
 
 const TARGET_LANGUAGES = {
   en: "en",
+  as: "as",
+  bn: "bn",
+  gu: "gu",
   hi: "hi",
-  te: "te",
-  ta: "ta",
   kn: "kn",
   ml: "ml",
   mr: "mr",
-  bn: "bn",
-  gu: "gu",
+  or: "or",
   pa: "pa",
+  ta: "ta",
+  te: "te",
   ur: "ur",
 };
 
@@ -65,6 +69,100 @@ const TTS_VOICES = {
   ur: { default: "ur-IN-GulNeural", female: "ur-IN-GulNeural", male: "ur-IN-SalmanNeural" },
 };
 
+
+const LANGUAGE_NAMES = {
+  en: "Indian English",
+  as: "Assamese",
+  bn: "Bengali",
+  gu: "Gujarati",
+  hi: "Hindi",
+  kn: "Kannada",
+  ml: "Malayalam",
+  mr: "Marathi",
+  or: "Odia",
+  pa: "Punjabi",
+  ta: "Tamil",
+  te: "Telugu",
+  ur: "Urdu",
+};
+
+function languageName(languageCode) {
+  return LANGUAGE_NAMES[code(languageCode)] || "Indian English";
+}
+
+function azureOpenAiTextConfig() {
+  const endpoint = (process.env.AZURE_OPENAI_ENDPOINT || "").replace(/\/$/, "");
+  const apiKey = process.env.AZURE_OPENAI_API_KEY || "";
+  const deployment = process.env.AZURE_OPENAI_TEXT_DEPLOYMENT || process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || "gpt-4o";
+  const apiVersion = process.env.AZURE_OPENAI_TEXT_API_VERSION || "2025-01-01-preview";
+  if (!endpoint || !apiKey || !deployment) return null;
+  return { endpoint, apiKey, deployment, apiVersion };
+}
+
+function translationStyleEnabled() {
+  const style = String(process.env.TRANSLATION_STYLE || "indian-mixed").trim().toLowerCase();
+  return style !== "off" && style !== "plain" && style !== "none";
+}
+
+async function rewriteIndianMixedText({ sourceLanguage, targetLanguage, sourceText, translatedText }) {
+  const cleanTranslated = trimForSpeech(translatedText);
+  if (!translationStyleEnabled()) return cleanTranslated;
+  const config = azureOpenAiTextConfig();
+  if (!config || cleanTranslated.length < 3) return cleanTranslated;
+
+  const target = languageName(targetLanguage);
+  const source = languageName(sourceLanguage);
+  const url = `${config.endpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.TRANSLATION_REWRITE_TIMEOUT_MS || 1800));
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "api-key": config.apiKey,
+        "content-type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        temperature: 0.2,
+        max_tokens: 140,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You rewrite translated speech for a live Indian phone call.",
+              "Return only the spoken sentence. Do not answer, explain, add facts, or ask questions.",
+              "Preserve the exact meaning and intent.",
+              "Use natural Indian code-mixed style: simple English words mixed with the target language.",
+              "Keep it balanced: not pure English, not overly pure local language, and not complex literary language.",
+              "Use common conversational English terms such as call, meeting, okay, please, time, problem, confirm, update, today when natural.",
+              "If target is Indian English, keep English dominant and natural, with Indian phrasing only when useful.",
+              "Keep names, numbers, dates, and technical words unchanged.",
+            ].join(" "),
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              sourceLanguage: source,
+              targetLanguage: target,
+              recognizedSpeech: sourceText || "",
+              directTranslation: cleanTranslated,
+            }),
+          },
+        ],
+      }),
+    });
+    if (!response.ok) throw new Error(`rewrite ${response.status}`);
+    const data = await response.json();
+    const rewritten = trimForSpeech(data.choices?.[0]?.message?.content || "");
+    return isUsefulText(rewritten) ? rewritten : cleanTranslated;
+  } catch (error) {
+    console.warn("Indian mixed rewrite skipped", error.message || String(error));
+    return cleanTranslated;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 function pcmBuffer(samples) {
   return Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
 }
@@ -243,11 +341,11 @@ class DirectionPipeline {
     }
   }
 
-  handleRecognized(event) {
+  async handleRecognized(event) {
     const result = event.result;
     if (!result || result.reason !== speechsdk.ResultReason.TranslatedSpeech) return;
-    const translated = trimForSpeech(result.translations?.get(targetLanguage(this.targetLanguage)));
-    if (!isUsefulText(translated)) return;
+    const directTranslation = trimForSpeech(result.translations?.get(targetLanguage(this.targetLanguage)));
+    if (!isUsefulText(directTranslation)) return;
     this.recognizedCount += 1;
     this.lastRecognizedAt = Date.now();
     this.lastSourceText = result.text || "";
