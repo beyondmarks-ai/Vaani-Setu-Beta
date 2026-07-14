@@ -304,6 +304,7 @@ class DirectionPipeline {
     this.lastSourceText = "";
     this.lastTranslatedText = "";
     this.lastError = "";
+    this.translationChain = Promise.resolve();
     this.outputChain = Promise.resolve();
   }
 
@@ -341,20 +342,46 @@ class DirectionPipeline {
     }
   }
 
-  async handleRecognized(event) {
+  handleRecognized(event) {
     const result = event.result;
     if (!result || result.reason !== speechsdk.ResultReason.TranslatedSpeech) return;
     const directTranslation = trimForSpeech(result.translations?.get(targetLanguage(this.targetLanguage)));
     if (!isUsefulText(directTranslation)) return;
+    const sourceText = result.text || "";
     this.recognizedCount += 1;
     this.lastRecognizedAt = Date.now();
-    this.lastSourceText = result.text || "";
-    this.lastTranslatedText = translated;
-    this.state = "synthesizing";
-    console.log(`Azure Speech translated ${this.callId}/${this.label}:`, { source: this.lastSourceText, translated });
-    this.queueSynthesis(translated);
-  }
+    this.lastSourceText = sourceText;
 
+    this.translationChain = this.translationChain
+      .then(async () => {
+        if (!this.active) return;
+        this.state = "rewriting";
+        const translated = await rewriteIndianMixedText({
+          sourceLanguage: this.sourceLanguage,
+          targetLanguage: this.targetLanguage,
+          sourceText,
+          translatedText: directTranslation,
+        });
+        if (!this.active) return;
+        this.lastTranslatedText = translated;
+        this.state = "synthesizing";
+        console.log(`Azure Speech translated ${this.callId}/${this.label}:`, {
+          source: sourceText,
+          directTranslation,
+          translated,
+        });
+        this.queueSynthesis(translated);
+      })
+      .catch((error) => {
+        this.lastError = error.message || String(error);
+        console.error(`Translation processing failed ${this.callId}/${this.label}`, error);
+        if (this.active) {
+          this.lastTranslatedText = directTranslation;
+          this.state = "synthesizing";
+          this.queueSynthesis(directTranslation);
+        }
+      });
+  }
   handleCanceled(event) {
     this.state = "failed";
     this.lastError = event.errorDetails || event.reason || "Azure Speech recognition canceled";
@@ -415,6 +442,7 @@ class DirectionPipeline {
       this.recognizer?.close();
       this.inputResampler.close();
       this.outputResampler.close();
+      await this.translationChain;
       await this.outputChain;
     } catch (error) {
       console.error(`Azure Speech direction cleanup failed ${this.callId}/${this.label}`, error);
