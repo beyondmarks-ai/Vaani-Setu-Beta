@@ -576,7 +576,7 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "indian-voices-20260714-1",
+    build: "ssml-voice-tuning-20260714-1",
     activeCalls: calls.size,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",

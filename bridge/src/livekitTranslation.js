@@ -126,6 +126,23 @@ function stopContinuousRecognition(recognizer) {
   });
 }
 
+function escapeSsml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function ssmlForText(languageCode, preferredVoice, text) {
+  const voice = ttsVoice(languageCode, preferredVoice);
+  const locale = speechLocale(languageCode);
+  const pitch = process.env.AZURE_TTS_PITCH || "+12%";
+  const rate = process.env.AZURE_TTS_RATE || "+8%";
+  const volume = process.env.AZURE_TTS_VOLUME || "+8%";
+  return `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${locale}"><voice name="${voice}"><prosody pitch="${pitch}" rate="${rate}" volume="${volume}">${escapeSsml(text)}</prosody></voice></speak>`;
+}
 function synthesizeText(speechKey, speechRegion, languageCode, preferredVoice, text) {
   return new Promise((resolve, reject) => {
     const speechConfig = speechsdk.SpeechConfig.fromSubscription(speechKey, speechRegion);
@@ -134,8 +151,8 @@ function synthesizeText(speechKey, speechRegion, languageCode, preferredVoice, t
     speechConfig.speechSynthesisOutputFormat = speechsdk.SpeechSynthesisOutputFormat.Raw24Khz16BitMonoPcm;
 
     const synthesizer = new speechsdk.SpeechSynthesizer(speechConfig, null);
-    synthesizer.speakTextAsync(
-      text,
+    synthesizer.speakSsmlAsync(
+      ssmlForText(languageCode, preferredVoice, text),
       (result) => {
         synthesizer.close();
         if (result.reason === speechsdk.ResultReason.SynthesizingAudioCompleted && result.audioData) {
@@ -200,15 +217,12 @@ class DirectionPipeline {
     const translationConfig = speechsdk.SpeechTranslationConfig.fromSubscription(this.speechKey, this.speechRegion);
     translationConfig.speechRecognitionLanguage = speechLocale(this.sourceLanguage);
     translationConfig.addTargetLanguage(targetLanguage(this.targetLanguage));
-    translationConfig.voiceName = ttsVoice(this.targetLanguage, this.voice);
-    translationConfig.speechSynthesisOutputFormat = speechsdk.SpeechSynthesisOutputFormat.Raw24Khz16BitMonoPcm;
     translationConfig.outputFormat = speechsdk.OutputFormat.Simple;
 
     this.recognizer = new speechsdk.TranslationRecognizer(translationConfig, audioConfig);
     this.recognizer.recognizing = (_sender, event) => this.handleRecognizing(event);
     this.recognizer.recognized = (_sender, event) => this.handleRecognized(event);
     this.recognizer.canceled = (_sender, event) => this.handleCanceled(event);
-    this.recognizer.synthesizing = (_sender, event) => this.handleSynthesizing(event);
     this.recognizer.sessionStarted = () => {
       this.state = "listening";
     };
@@ -238,8 +252,9 @@ class DirectionPipeline {
     this.lastRecognizedAt = Date.now();
     this.lastSourceText = result.text || "";
     this.lastTranslatedText = translated;
-    this.state = "translated";
+    this.state = "synthesizing";
     console.log(`Azure Speech translated ${this.callId}/${this.label}:`, { source: this.lastSourceText, translated });
+    this.queueSynthesis(translated);
   }
 
   handleCanceled(event) {
@@ -265,40 +280,28 @@ class DirectionPipeline {
     }
   }
 
-  handleSynthesizing(event) {
-    const result = event.result;
-    if (!result?.audio || result.audio.byteLength === 0) return;
-    if (
-      result.reason !== speechsdk.ResultReason.SynthesizingAudio &&
-      result.reason !== speechsdk.ResultReason.SynthesizingAudioCompleted
-    ) {
-      return;
-    }
+  queueSynthesis(text) {
     this.outputChain = this.outputChain
       .then(async () => {
-        const audio = Buffer.from(result.audio);
+        const audio = await synthesizeText(this.speechKey, this.speechRegion, this.targetLanguage, this.voice, text);
         const samples = bufferToPcm16(audio);
         const resampledFrames = this.outputResampler.push(makeFrame(samples, TTS_OUTPUT_RATE));
         for (const frame of resampledFrames) {
           await this.outputSource.captureFrame(frame);
           this.outputFrames += 1;
         }
-        if (result.reason === speechsdk.ResultReason.SynthesizingAudioCompleted) {
-          for (const frame of this.outputResampler.flush()) {
-            await this.outputSource.captureFrame(frame);
-            this.outputFrames += 1;
-          }
-          this.synthesizedCount += 1;
-          this.state = "listening";
-        } else {
-          this.state = "speaking_translation";
+        for (const frame of this.outputResampler.flush()) {
+          await this.outputSource.captureFrame(frame);
+          this.outputFrames += 1;
         }
+        this.synthesizedCount += 1;
         this.lastOutputAt = Date.now();
+        this.state = "listening";
       })
       .catch((error) => {
         this.state = "failed";
         this.lastError = error.message || String(error);
-        console.error(`Azure Speech synthesized audio publish failed ${this.callId}/${this.label}`, error);
+        console.error(`Azure Speech SSML TTS failed ${this.callId}/${this.label}`, error);
       });
   }
 
