@@ -1,20 +1,17 @@
 import crypto from "crypto";
 import express from "express";
 import jwt from "jsonwebtoken";
-import wrtc from "@roamhq/wrtc";
 import { TableClient } from "@azure/data-tables";
 import { WebPubSubServiceClient } from "@azure/web-pubsub";
 import { AccessToken } from "livekit-server-sdk";
 import { WebSocketServer } from "ws";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
-import { TranslationPipeline } from "./openaiRealtime.js";
 import { TranslationManager } from "./livekitTranslation.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-const calls = new Map();
 const onlineClients = new Map();
 const PORT = process.env.PORT || 8080;
 const DEFAULT_LANGUAGE = "en";
@@ -576,8 +573,8 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "translation-hotfix-20260714-1",
-    activeCalls: calls.size,
+    build: "direct-translation-20260714-1",
+    activeCalls: translationManager.status().activeSessions,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",
     store: store.constructor.name,
@@ -796,7 +793,6 @@ app.post("/api/calls/:callId/end", async (req, res, next) => {
     const updatedCall = await store.updateCall(callId, { status: "ended", endedBy: user.uid, endedReason: reason, endedAt: nowIso() });
     notifyCallUpdate(updatedCall);
     await translationManager.stop(callId);
-    cleanupCall(callId);
     res.json({ callId, status: "ended" });
   } catch (error) {
     next(error);
@@ -827,96 +823,6 @@ app.get("/api/calls/:callId/translation/status", async (req, res, next) => {
     next(error);
   }
 });
-
-function verifyBridgeToken(header) {
-  const token = (header || "").replace(/^Bearer\s+/i, "");
-  if (!token) throwHttp(401, "Missing bridge token");
-  return jwt.verify(token, APP_JWT_SECRET, { audience: "vaani-setu-app", issuer: "vaani-setu-azure" });
-}
-
-function getCallState(callId) {
-  if (!calls.has(callId)) calls.set(callId, { peers: new Map(), pipelines: new Map(), createdAt: Date.now() });
-  return calls.get(callId);
-}
-
-app.post("/webrtc/offer", async (req, res, next) => {
-  try {
-    const claims = verifyBridgeToken(req.headers.authorization);
-    const { sdp, type } = req.body || {};
-    if (type !== "offer" || typeof sdp !== "string") throwHttp(400, "Expected SDP offer.");
-
-    const state = getCallState(claims.callId);
-    const peer = new wrtc.RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
-    state.peers.set(claims.role, peer);
-    peer.onconnectionstatechange = () => {
-      if (["failed", "closed", "disconnected"].includes(peer.connectionState)) cleanupPeer(claims.callId, claims.role);
-    };
-    peer.ontrack = async (event) => {
-      console.log(`Received ${event.track.kind} track for ${claims.callId}/${claims.role}`);
-      if (event.track.kind !== "audio") return;
-      await ensurePipeline(state, claims);
-    };
-    peer.addTransceiver("audio", { direction: "sendrecv" });
-    await peer.setRemoteDescription({ type, sdp });
-    const answer = await peer.createAnswer();
-    await peer.setLocalDescription(answer);
-    await waitForIceGathering(peer);
-    res.json({ type: peer.localDescription.type, sdp: peer.localDescription.sdp });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.post("/calls/:callId/end", (req, res) => {
-  cleanupCall(req.params.callId);
-  res.json({ ok: true });
-});
-
-async function ensurePipeline(state, claims) {
-  const key = claims.role;
-  if (state.pipelines.has(key)) return state.pipelines.get(key);
-  const pipeline = new TranslationPipeline({
-    sourceLanguage: claims.sourceLanguage,
-    targetLanguage: claims.targetLanguage,
-    onAudioDelta: () => {},
-    onTranscript: (delta) => console.log(`Transcript ${claims.callId}/${claims.role}:`, delta),
-  });
-  await pipeline.connect();
-  state.pipelines.set(key, pipeline);
-  return pipeline;
-}
-
-function cleanupCall(callId) {
-  const state = calls.get(callId);
-  if (!state) return;
-  for (const role of Array.from(state.peers.keys())) cleanupPeer(callId, role);
-  calls.delete(callId);
-}
-
-function cleanupPeer(callId, role) {
-  const state = calls.get(callId);
-  if (!state) return;
-  const peer = state.peers.get(role);
-  if (peer) peer.close();
-  state.peers.delete(role);
-  const pipeline = state.pipelines.get(role);
-  if (pipeline) pipeline.close();
-  state.pipelines.delete(role);
-  if (state.peers.size === 0) calls.delete(callId);
-}
-
-function waitForIceGathering(peer) {
-  if (peer.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((resolve) => {
-    const timeout = setTimeout(resolve, 2500);
-    peer.onicegatheringstatechange = () => {
-      if (peer.iceGatheringState === "complete") {
-        clearTimeout(timeout);
-        resolve();
-      }
-    };
-  });
-}
 
 app.use((error, _req, res, _next) => {
   console.error(error);

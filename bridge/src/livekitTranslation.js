@@ -70,99 +70,6 @@ const TTS_VOICES = {
 };
 
 
-const LANGUAGE_NAMES = {
-  en: "Indian English",
-  as: "Assamese",
-  bn: "Bengali",
-  gu: "Gujarati",
-  hi: "Hindi",
-  kn: "Kannada",
-  ml: "Malayalam",
-  mr: "Marathi",
-  or: "Odia",
-  pa: "Punjabi",
-  ta: "Tamil",
-  te: "Telugu",
-  ur: "Urdu",
-};
-
-function languageName(languageCode) {
-  return LANGUAGE_NAMES[code(languageCode)] || "Indian English";
-}
-
-function azureOpenAiTextConfig() {
-  const endpoint = (process.env.AZURE_OPENAI_ENDPOINT || "").replace(/\/$/, "");
-  const apiKey = process.env.AZURE_OPENAI_API_KEY || "";
-  const deployment = process.env.AZURE_OPENAI_TEXT_DEPLOYMENT || process.env.AZURE_OPENAI_CHAT_DEPLOYMENT || "gpt-4o";
-  const apiVersion = process.env.AZURE_OPENAI_TEXT_API_VERSION || "2025-01-01-preview";
-  if (!endpoint || !apiKey || !deployment) return null;
-  return { endpoint, apiKey, deployment, apiVersion };
-}
-
-function translationStyleEnabled() {
-  const style = String(process.env.TRANSLATION_STYLE || "indian-mixed").trim().toLowerCase();
-  return style !== "off" && style !== "plain" && style !== "none";
-}
-
-async function rewriteIndianMixedText({ sourceLanguage, targetLanguage, sourceText, translatedText }) {
-  const cleanTranslated = trimForSpeech(translatedText);
-  if (!translationStyleEnabled()) return cleanTranslated;
-  const config = azureOpenAiTextConfig();
-  if (!config || cleanTranslated.length < 3) return cleanTranslated;
-
-  const target = languageName(targetLanguage);
-  const source = languageName(sourceLanguage);
-  const url = `${config.endpoint}/openai/deployments/${encodeURIComponent(config.deployment)}/chat/completions?api-version=${encodeURIComponent(config.apiVersion)}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.TRANSLATION_REWRITE_TIMEOUT_MS || 1800));
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "api-key": config.apiKey,
-        "content-type": "application/json",
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        temperature: 0.2,
-        max_tokens: 140,
-        messages: [
-          {
-            role: "system",
-            content: [
-              "You rewrite translated speech for a live Indian phone call.",
-              "Return only the spoken sentence. Do not answer, explain, add facts, or ask questions.",
-              "Preserve the exact meaning and intent.",
-              "Use natural Indian code-mixed style: simple English words mixed with the target language.",
-              "Keep it balanced: not pure English, not overly pure local language, and not complex literary language.",
-              "Use common conversational English terms such as call, meeting, okay, please, time, problem, confirm, update, today when natural.",
-              "If target is Indian English, keep English dominant and natural, with Indian phrasing only when useful.",
-              "Keep names, numbers, dates, and technical words unchanged.",
-            ].join(" "),
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              sourceLanguage: source,
-              targetLanguage: target,
-              recognizedSpeech: sourceText || "",
-              directTranslation: cleanTranslated,
-            }),
-          },
-        ],
-      }),
-    });
-    if (!response.ok) throw new Error(`rewrite ${response.status}`);
-    const data = await response.json();
-    const rewritten = trimForSpeech(data.choices?.[0]?.message?.content || "");
-    return isUsefulText(rewritten) ? rewritten : cleanTranslated;
-  } catch (error) {
-    console.warn("Indian mixed rewrite skipped", error.message || String(error));
-    return cleanTranslated;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
 function pcmBuffer(samples) {
   return Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
 }
@@ -210,6 +117,34 @@ function trimForSpeech(text) {
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   if (cleaned.length <= MAX_TTS_CHARS) return cleaned;
   return cleaned.slice(0, MAX_TTS_CHARS).replace(/\s+\S*$/, "");
+}
+
+function normalizedSpeech(text) {
+  return String(text || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function isSimilarSpeech(left, right) {
+  const a = normalizedSpeech(left);
+  const b = normalizedSpeech(right);
+  if (!a || !b) return false;
+
+  const compactA = a.replace(/\s+/g, "");
+  const compactB = b.replace(/\s+/g, "");
+  if (compactA === compactB) return true;
+
+  const shorter = compactA.length <= compactB.length ? compactA : compactB;
+  const longer = compactA.length > compactB.length ? compactA : compactB;
+  if (shorter.length >= 8 && longer.includes(shorter) && shorter.length / longer.length >= 0.7) return true;
+
+  const aTokens = new Set(a.split(/\s+/));
+  const bTokens = new Set(b.split(/\s+/));
+  if (Math.min(aTokens.size, bTokens.size) < 2) return false;
+  const overlap = [...aTokens].filter((token) => bTokens.has(token)).length;
+  return overlap / Math.max(aTokens.size, bTokens.size) >= 0.75;
 }
 
 function startContinuousRecognition(recognizer) {
@@ -279,12 +214,14 @@ async function createBotToken({ apiKey, apiSecret, roomName, identity }) {
 }
 
 class DirectionPipeline {
-  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, speechKey, speechRegion }) {
+  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, speechKey, speechRegion, shouldSuppressEcho, onOutput }) {
     this.callId = callId;
     this.label = label;
     this.outputSource = outputSource;
     this.speechKey = speechKey;
     this.speechRegion = speechRegion;
+    this.shouldSuppressEcho = shouldSuppressEcho;
+    this.onOutput = onOutput;
     this.sourceLanguage = code(sourceLanguage);
     this.targetLanguage = code(outputLanguage);
     this.voice = voice || "alloy";
@@ -304,7 +241,6 @@ class DirectionPipeline {
     this.lastSourceText = "";
     this.lastTranslatedText = "";
     this.lastError = "";
-    this.translationChain = Promise.resolve();
     this.outputChain = Promise.resolve();
   }
 
@@ -348,39 +284,22 @@ class DirectionPipeline {
     const directTranslation = trimForSpeech(result.translations?.get(targetLanguage(this.targetLanguage)));
     if (!isUsefulText(directTranslation)) return;
     const sourceText = result.text || "";
+    if (this.shouldSuppressEcho?.(sourceText)) {
+      this.state = "listening";
+      console.log(`Suppressed translated audio echo ${this.callId}/${this.label}:`, sourceText);
+      return;
+    }
     this.recognizedCount += 1;
     this.lastRecognizedAt = Date.now();
     this.lastSourceText = sourceText;
 
-    this.translationChain = this.translationChain
-      .then(async () => {
-        if (!this.active) return;
-        this.state = "rewriting";
-        const translated = await rewriteIndianMixedText({
-          sourceLanguage: this.sourceLanguage,
-          targetLanguage: this.targetLanguage,
-          sourceText,
-          translatedText: directTranslation,
-        });
-        if (!this.active) return;
-        this.lastTranslatedText = translated;
-        this.state = "synthesizing";
-        console.log(`Azure Speech translated ${this.callId}/${this.label}:`, {
-          source: sourceText,
-          directTranslation,
-          translated,
-        });
-        this.queueSynthesis(translated);
-      })
-      .catch((error) => {
-        this.lastError = error.message || String(error);
-        console.error(`Translation processing failed ${this.callId}/${this.label}`, error);
-        if (this.active) {
-          this.lastTranslatedText = directTranslation;
-          this.state = "synthesizing";
-          this.queueSynthesis(directTranslation);
-        }
-      });
+    this.lastTranslatedText = directTranslation;
+    this.state = "synthesizing";
+    console.log(`Azure Speech translated ${this.callId}/${this.label}:`, {
+      source: sourceText,
+      translated: directTranslation,
+    });
+    this.queueSynthesis(directTranslation);
   }
   handleCanceled(event) {
     this.state = "failed";
@@ -409,6 +328,7 @@ class DirectionPipeline {
     this.outputChain = this.outputChain
       .then(async () => {
         const audio = await synthesizeText(this.speechKey, this.speechRegion, this.targetLanguage, this.voice, text);
+        this.onOutput?.(text);
         const samples = bufferToPcm16(audio);
         const resampledFrames = this.outputResampler.push(makeFrame(samples, TTS_OUTPUT_RATE));
         for (const frame of resampledFrames) {
@@ -440,10 +360,9 @@ class DirectionPipeline {
     try {
       if (this.recognizer) await stopContinuousRecognition(this.recognizer);
       this.recognizer?.close();
+      await this.outputChain;
       this.inputResampler.close();
       this.outputResampler.close();
-      await this.translationChain;
-      await this.outputChain;
     } catch (error) {
       console.error(`Azure Speech direction cleanup failed ${this.callId}/${this.label}`, error);
     }
@@ -483,6 +402,7 @@ class LiveKitTranslationSession {
     this.active = false;
     this.lastError = "";
     this.streamReaders = new Map();
+    this.recentDeliveredAudio = new Map();
 
     this.toCallerSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
     this.toCalleeSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
@@ -498,6 +418,8 @@ class LiveKitTranslationSession {
       outputSource: this.toCalleeSource,
       speechKey: this.speechKey,
       speechRegion: this.speechRegion,
+      shouldSuppressEcho: (text) => this.isRecentEcho(call.callerUid, text),
+      onOutput: (text) => this.rememberDeliveredAudio(call.calleeUid, text),
     });
     this.calleeToCaller = new DirectionPipeline({
       callId: this.callId,
@@ -508,7 +430,23 @@ class LiveKitTranslationSession {
       outputSource: this.toCallerSource,
       speechKey: this.speechKey,
       speechRegion: this.speechRegion,
+      shouldSuppressEcho: (text) => this.isRecentEcho(call.calleeUid, text),
+      onOutput: (text) => this.rememberDeliveredAudio(call.callerUid, text),
     });
+  }
+
+  rememberDeliveredAudio(userId, text) {
+    const now = Date.now();
+    const recent = this.recentDeliveredAudio.get(userId) || [];
+    recent.push({ text, at: now });
+    this.recentDeliveredAudio.set(userId, recent.filter((item) => now - item.at < 8000).slice(-4));
+  }
+
+  isRecentEcho(userId, text) {
+    const now = Date.now();
+    const recent = (this.recentDeliveredAudio.get(userId) || []).filter((item) => now - item.at < 8000);
+    this.recentDeliveredAudio.set(userId, recent);
+    return recent.some((item) => isSimilarSpeech(item.text, text));
   }
 
   async start() {

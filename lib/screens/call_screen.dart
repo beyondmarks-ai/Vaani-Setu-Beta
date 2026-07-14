@@ -30,11 +30,18 @@ class _CallScreenState extends State<CallScreen> {
       adaptiveStream: true,
       dynacast: false,
       fastPublish: true,
+      defaultAudioCaptureOptions: AudioCaptureOptions(
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        voiceIsolation: true,
+      ),
+      defaultAudioOutputOptions: AudioOutputOptions(speakerOn: false),
     ),
   );
 
   bool _muted = false;
-  bool _speakerOn = true;
+  bool _speakerOn = false;
   bool _connectingRoom = false;
   bool _roomConnected = false;
   String _mediaStatus = 'Connecting call...';
@@ -105,13 +112,13 @@ class _CallScreenState extends State<CallScreen> {
       _applyTranslationSubscriptions();
 
       await _room.localParticipant?.setMicrophoneEnabled(true);
-      await Hardware.instance.setSpeakerphoneOn(true);
+      await Hardware.instance.setSpeakerphoneOn(false);
 
       if (mounted) {
         setState(() {
           _roomConnected = true;
           _muted = false;
-          _speakerOn = true;
+          _speakerOn = false;
           _mediaStatus = _translatedTrackReady
               ? 'Translation connected'
               : 'Connected, preparing translation...';
