@@ -50,17 +50,19 @@ const TARGET_LANGUAGES = {
 };
 
 const TTS_VOICES = {
-  en: { alloy: "en-IN-NeerjaNeural", echo: "en-IN-PrabhatNeural", shimmer: "en-IN-NeerjaNeural" },
-  hi: { alloy: "hi-IN-SwaraNeural", echo: "hi-IN-MadhurNeural", shimmer: "hi-IN-SwaraNeural" },
-  te: { alloy: "te-IN-ShrutiNeural", echo: "te-IN-MohanNeural", shimmer: "te-IN-ShrutiNeural" },
-  ta: { alloy: "ta-IN-PallaviNeural", echo: "ta-IN-ValluvarNeural", shimmer: "ta-IN-PallaviNeural" },
-  kn: { alloy: "kn-IN-SapnaNeural", echo: "kn-IN-GaganNeural", shimmer: "kn-IN-SapnaNeural" },
-  ml: { alloy: "ml-IN-SobhanaNeural", echo: "ml-IN-MidhunNeural", shimmer: "ml-IN-SobhanaNeural" },
-  mr: { alloy: "mr-IN-AarohiNeural", echo: "mr-IN-ManoharNeural", shimmer: "mr-IN-AarohiNeural" },
-  bn: { alloy: "bn-IN-TanishaaNeural", echo: "bn-IN-BashkarNeural", shimmer: "bn-IN-TanishaaNeural" },
-  gu: { alloy: "gu-IN-DhwaniNeural", echo: "gu-IN-NiranjanNeural", shimmer: "gu-IN-DhwaniNeural" },
-  pa: { alloy: "pa-IN-VaaniNeural", echo: "pa-IN-OjasNeural", shimmer: "pa-IN-VaaniNeural" },
-  ur: { alloy: "ur-IN-GulNeural", echo: "ur-IN-SalmanNeural", shimmer: "ur-IN-GulNeural" },
+  en: { default: "en-IN-NeerjaNeural", female: "en-IN-NeerjaNeural", male: "en-IN-PrabhatNeural" },
+  as: { default: "as-IN-YashicaNeural", female: "as-IN-YashicaNeural", male: "as-IN-PriyomNeural" },
+  bn: { default: "bn-IN-TanishaaNeural", female: "bn-IN-TanishaaNeural", male: "bn-IN-BashkarNeural" },
+  gu: { default: "gu-IN-DhwaniNeural", female: "gu-IN-DhwaniNeural", male: "gu-IN-NiranjanNeural" },
+  hi: { default: "hi-IN-SwaraNeural", female: "hi-IN-SwaraNeural", male: "hi-IN-MadhurNeural" },
+  kn: { default: "kn-IN-SapnaNeural", female: "kn-IN-SapnaNeural", male: "kn-IN-GaganNeural" },
+  ml: { default: "ml-IN-SobhanaNeural", female: "ml-IN-SobhanaNeural", male: "ml-IN-MidhunNeural" },
+  mr: { default: "mr-IN-AarohiNeural", female: "mr-IN-AarohiNeural", male: "mr-IN-ManoharNeural" },
+  or: { default: "or-IN-SubhasiniNeural", female: "or-IN-SubhasiniNeural", male: "or-IN-SukantNeural" },
+  pa: { default: "pa-IN-VaaniNeural", female: "pa-IN-VaaniNeural", male: "pa-IN-OjasNeural" },
+  ta: { default: "ta-IN-PallaviNeural", female: "ta-IN-PallaviNeural", male: "ta-IN-ValluvarNeural" },
+  te: { default: "te-IN-ShrutiNeural", female: "te-IN-ShrutiNeural", male: "te-IN-MohanNeural" },
+  ur: { default: "ur-IN-GulNeural", female: "ur-IN-GulNeural", male: "ur-IN-SalmanNeural" },
 };
 
 function pcmBuffer(samples) {
@@ -89,10 +91,14 @@ function targetLanguage(languageCode) {
 }
 
 function ttsVoice(languageCode, preferredVoice) {
+  const requested = String(preferredVoice || "").trim();
+  if (/^[a-z]{2,3}-[A-Z]{2}-[A-Za-z0-9]+Neural$/.test(requested)) return requested;
   const lang = code(languageCode);
   const voiceSet = TTS_VOICES[lang] || TTS_VOICES.en;
   const envName = `AZURE_TTS_VOICE_${lang.toUpperCase()}`;
-  return process.env[envName] || voiceSet[preferredVoice] || voiceSet.alloy;
+  const alias = requested.toLowerCase();
+  const mappedAlias = alias === "echo" ? voiceSet.male : voiceSet.female;
+  return process.env[envName] || voiceSet[alias] || mappedAlias || voiceSet.default;
 }
 
 function isUsefulText(text) {

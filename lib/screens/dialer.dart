@@ -140,11 +140,12 @@ class _DialerScreenState extends State<DialerScreen> {
     var listenLanguage = _profile.listenLanguage;
     var preferredVoice = _profile.preferredVoice;
     final languageCodes = options.languages.map((item) => item.code).toSet();
-    final voiceIds = options.voices.map((item) => item.id).toSet();
     if (!languageCodes.contains(spokenLanguage)) spokenLanguage = 'en';
     if (!languageCodes.contains(listenLanguage)) listenLanguage = 'en';
+    var languageVoices = voicesForLanguage(listenLanguage, options);
+    var voiceIds = languageVoices.map((item) => item.id).toSet();
     if (!voiceIds.contains(preferredVoice)) {
-      preferredVoice = options.defaultVoice;
+      preferredVoice = defaultVoiceForLanguage(listenLanguage, options);
     }
 
     await showModalBottomSheet<void>(
@@ -229,7 +230,22 @@ class _DialerScreenState extends State<DialerScreen> {
                           .toList(),
                       onChanged: (value) {
                         if (value != null) {
-                          setSheetState(() => listenLanguage = value);
+                          setSheetState(() {
+                            listenLanguage = value;
+                            languageVoices = voicesForLanguage(
+                              listenLanguage,
+                              options,
+                            );
+                            voiceIds = languageVoices
+                                .map((item) => item.id)
+                                .toSet();
+                            if (!voiceIds.contains(preferredVoice)) {
+                              preferredVoice = defaultVoiceForLanguage(
+                                listenLanguage,
+                                options,
+                              );
+                            }
+                          });
                         }
                       },
                     ),
@@ -238,7 +254,7 @@ class _DialerScreenState extends State<DialerScreen> {
                       label: 'Voice',
                       icon: Icons.graphic_eq,
                       value: preferredVoice,
-                      items: options.voices
+                      items: languageVoices
                           .map(
                             (item) => DropdownMenuItem(
                               value: item.id,

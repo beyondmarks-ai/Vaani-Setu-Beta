@@ -25,7 +25,7 @@ class UserNumberProfile {
       number: data['number'] as String? ?? '',
       spokenLanguage: data['spokenLanguage'] as String? ?? 'en',
       listenLanguage: data['listenLanguage'] as String? ?? 'en',
-      preferredVoice: data['preferredVoice'] as String? ?? 'alloy',
+      preferredVoice: data['preferredVoice'] as String? ?? 'en-IN-NeerjaNeural',
     );
   }
 

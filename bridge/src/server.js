@@ -32,24 +32,49 @@ const AZURE_SPEECH_KEY = process.env.AZURE_SPEECH_KEY || "";
 const AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "";
 
 const SUPPORTED_LANGUAGES = [
-  { code: "en", name: "English" },
+  { code: "en", name: "English (India)" },
+  { code: "as", name: "Assamese" },
+  { code: "bn", name: "Bengali" },
+  { code: "gu", name: "Gujarati" },
   { code: "hi", name: "Hindi" },
-  { code: "te", name: "Telugu" },
-  { code: "ta", name: "Tamil" },
   { code: "kn", name: "Kannada" },
   { code: "ml", name: "Malayalam" },
   { code: "mr", name: "Marathi" },
-  { code: "bn", name: "Bengali" },
-  { code: "gu", name: "Gujarati" },
+  { code: "or", name: "Odia" },
   { code: "pa", name: "Punjabi" },
+  { code: "ta", name: "Tamil" },
+  { code: "te", name: "Telugu" },
   { code: "ur", name: "Urdu" },
 ];
 const SUPPORTED_VOICES = [
-  { id: "alloy", name: "Alloy" },
-  { id: "echo", name: "Echo" },
-  { id: "shimmer", name: "Shimmer" },
+  { id: "en-IN-NeerjaNeural", name: "English - Neerja", languageCode: "en", gender: "Female" },
+  { id: "en-IN-PrabhatNeural", name: "English - Prabhat", languageCode: "en", gender: "Male" },
+  { id: "as-IN-YashicaNeural", name: "Assamese - Yashica", languageCode: "as", gender: "Female" },
+  { id: "as-IN-PriyomNeural", name: "Assamese - Priyom", languageCode: "as", gender: "Male" },
+  { id: "bn-IN-TanishaaNeural", name: "Bengali - Tanishaa", languageCode: "bn", gender: "Female" },
+  { id: "bn-IN-BashkarNeural", name: "Bengali - Bashkar", languageCode: "bn", gender: "Male" },
+  { id: "gu-IN-DhwaniNeural", name: "Gujarati - Dhwani", languageCode: "gu", gender: "Female" },
+  { id: "gu-IN-NiranjanNeural", name: "Gujarati - Niranjan", languageCode: "gu", gender: "Male" },
+  { id: "hi-IN-SwaraNeural", name: "Hindi - Swara", languageCode: "hi", gender: "Female" },
+  { id: "hi-IN-MadhurNeural", name: "Hindi - Madhur", languageCode: "hi", gender: "Male" },
+  { id: "kn-IN-SapnaNeural", name: "Kannada - Sapna", languageCode: "kn", gender: "Female" },
+  { id: "kn-IN-GaganNeural", name: "Kannada - Gagan", languageCode: "kn", gender: "Male" },
+  { id: "ml-IN-SobhanaNeural", name: "Malayalam - Sobhana", languageCode: "ml", gender: "Female" },
+  { id: "ml-IN-MidhunNeural", name: "Malayalam - Midhun", languageCode: "ml", gender: "Male" },
+  { id: "mr-IN-AarohiNeural", name: "Marathi - Aarohi", languageCode: "mr", gender: "Female" },
+  { id: "mr-IN-ManoharNeural", name: "Marathi - Manohar", languageCode: "mr", gender: "Male" },
+  { id: "or-IN-SubhasiniNeural", name: "Odia - Subhasini", languageCode: "or", gender: "Female" },
+  { id: "or-IN-SukantNeural", name: "Odia - Sukant", languageCode: "or", gender: "Male" },
+  { id: "pa-IN-VaaniNeural", name: "Punjabi - Vaani", languageCode: "pa", gender: "Female" },
+  { id: "pa-IN-OjasNeural", name: "Punjabi - Ojas", languageCode: "pa", gender: "Male" },
+  { id: "ta-IN-PallaviNeural", name: "Tamil - Pallavi", languageCode: "ta", gender: "Female" },
+  { id: "ta-IN-ValluvarNeural", name: "Tamil - Valluvar", languageCode: "ta", gender: "Male" },
+  { id: "te-IN-ShrutiNeural", name: "Telugu - Shruti", languageCode: "te", gender: "Female" },
+  { id: "te-IN-MohanNeural", name: "Telugu - Mohan", languageCode: "te", gender: "Male" },
+  { id: "ur-IN-GulNeural", name: "Urdu - Gul", languageCode: "ur", gender: "Female" },
+  { id: "ur-IN-SalmanNeural", name: "Urdu - Salman", languageCode: "ur", gender: "Male" },
 ];
-const DEFAULT_VOICE = "alloy";
+const DEFAULT_VOICE = "en-IN-NeerjaNeural";
 
 const pubsub = WEB_PUBSUB_CONNECTION_STRING
   ? new WebPubSubServiceClient(WEB_PUBSUB_CONNECTION_STRING, WEB_PUBSUB_HUB)
@@ -346,7 +371,8 @@ function cleanLanguage(value, fieldName) {
 
 function cleanVoice(value) {
   if (typeof value !== "string") return DEFAULT_VOICE;
-  const voice = value.trim().toLowerCase();
+  const voice = value.trim();
+  if (["alloy", "echo", "shimmer"].includes(voice.toLowerCase())) return DEFAULT_VOICE;
   if (!SUPPORTED_VOICES.some((item) => item.id === voice)) throwHttp(400, "Unsupported voice.");
   return voice;
 }
@@ -550,7 +576,7 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "azure-speech-translation-20260714-1",
+    build: "indian-voices-20260714-1",
     activeCalls: calls.size,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",
