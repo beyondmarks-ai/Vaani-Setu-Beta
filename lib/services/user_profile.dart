@@ -6,6 +6,7 @@ class UserNumberProfile {
     required this.number,
     required this.spokenLanguage,
     required this.listenLanguage,
+    required this.preferredVoice,
   });
 
   final String uid;
@@ -14,6 +15,7 @@ class UserNumberProfile {
   final String number;
   final String spokenLanguage;
   final String listenLanguage;
+  final String preferredVoice;
 
   factory UserNumberProfile.fromMap(Map<String, dynamic> data) {
     return UserNumberProfile(
@@ -23,6 +25,7 @@ class UserNumberProfile {
       number: data['number'] as String? ?? '',
       spokenLanguage: data['spokenLanguage'] as String? ?? 'en',
       listenLanguage: data['listenLanguage'] as String? ?? 'en',
+      preferredVoice: data['preferredVoice'] as String? ?? 'alloy',
     );
   }
 
@@ -34,6 +37,23 @@ class UserNumberProfile {
       'number': number,
       'spokenLanguage': spokenLanguage,
       'listenLanguage': listenLanguage,
+      'preferredVoice': preferredVoice,
     };
+  }
+
+  UserNumberProfile copyWith({
+    String? spokenLanguage,
+    String? listenLanguage,
+    String? preferredVoice,
+  }) {
+    return UserNumberProfile(
+      uid: uid,
+      email: email,
+      suffix: suffix,
+      number: number,
+      spokenLanguage: spokenLanguage ?? this.spokenLanguage,
+      listenLanguage: listenLanguage ?? this.listenLanguage,
+      preferredVoice: preferredVoice ?? this.preferredVoice,
+    );
   }
 }

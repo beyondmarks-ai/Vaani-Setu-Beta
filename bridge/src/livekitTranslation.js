@@ -1,0 +1,554 @@
+import {
+  AudioFrame,
+  AudioResampler,
+  AudioResamplerQuality,
+  AudioSource,
+  AudioStream,
+  LocalAudioTrack,
+  Room,
+  RoomEvent,
+  TrackKind,
+  TrackPublishOptions,
+  TrackSource,
+} from "@livekit/rtc-node";
+import { AccessToken } from "livekit-server-sdk";
+import * as speechsdk from "microsoft-cognitiveservices-speech-sdk";
+
+const LIVEKIT_RATE = 48000;
+const SPEECH_INPUT_RATE = Number(process.env.AZURE_SPEECH_INPUT_RATE || 16000);
+const TTS_OUTPUT_RATE = Number(process.env.AZURE_TTS_OUTPUT_RATE || 24000);
+const CHANNELS = 1;
+const BOT_PREFIX = "translator";
+const MAX_TTS_CHARS = Number(process.env.TRANSLATION_MAX_TTS_CHARS || 260);
+
+const LANGUAGE_LOCALES = {
+  en: "en-IN",
+  hi: "hi-IN",
+  te: "te-IN",
+  ta: "ta-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  mr: "mr-IN",
+  bn: "bn-IN",
+  gu: "gu-IN",
+  pa: "pa-IN",
+  ur: "ur-IN",
+};
+
+const TARGET_LANGUAGES = {
+  en: "en",
+  hi: "hi",
+  te: "te",
+  ta: "ta",
+  kn: "kn",
+  ml: "ml",
+  mr: "mr",
+  bn: "bn",
+  gu: "gu",
+  pa: "pa",
+  ur: "ur",
+};
+
+const TTS_VOICES = {
+  en: { alloy: "en-IN-NeerjaNeural", echo: "en-IN-PrabhatNeural", shimmer: "en-IN-NeerjaNeural" },
+  hi: { alloy: "hi-IN-SwaraNeural", echo: "hi-IN-MadhurNeural", shimmer: "hi-IN-SwaraNeural" },
+  te: { alloy: "te-IN-ShrutiNeural", echo: "te-IN-MohanNeural", shimmer: "te-IN-ShrutiNeural" },
+  ta: { alloy: "ta-IN-PallaviNeural", echo: "ta-IN-ValluvarNeural", shimmer: "ta-IN-PallaviNeural" },
+  kn: { alloy: "kn-IN-SapnaNeural", echo: "kn-IN-GaganNeural", shimmer: "kn-IN-SapnaNeural" },
+  ml: { alloy: "ml-IN-SobhanaNeural", echo: "ml-IN-MidhunNeural", shimmer: "ml-IN-SobhanaNeural" },
+  mr: { alloy: "mr-IN-AarohiNeural", echo: "mr-IN-ManoharNeural", shimmer: "mr-IN-AarohiNeural" },
+  bn: { alloy: "bn-IN-TanishaaNeural", echo: "bn-IN-BashkarNeural", shimmer: "bn-IN-TanishaaNeural" },
+  gu: { alloy: "gu-IN-DhwaniNeural", echo: "gu-IN-NiranjanNeural", shimmer: "gu-IN-DhwaniNeural" },
+  pa: { alloy: "pa-IN-VaaniNeural", echo: "pa-IN-OjasNeural", shimmer: "pa-IN-VaaniNeural" },
+  ur: { alloy: "ur-IN-GulNeural", echo: "ur-IN-SalmanNeural", shimmer: "ur-IN-GulNeural" },
+};
+
+function pcmBuffer(samples) {
+  return Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
+}
+
+function bufferToPcm16(buffer) {
+  return new Int16Array(buffer.buffer, buffer.byteOffset, Math.floor(buffer.byteLength / 2));
+}
+
+function makeFrame(samples, sampleRate) {
+  return new AudioFrame(samples, sampleRate, CHANNELS, Math.floor(samples.length / CHANNELS));
+}
+
+function code(value, fallback = "en") {
+  const normalized = String(value || fallback).trim().toLowerCase();
+  return TARGET_LANGUAGES[normalized] ? normalized : fallback;
+}
+
+function speechLocale(languageCode) {
+  return LANGUAGE_LOCALES[code(languageCode)] || LANGUAGE_LOCALES.en;
+}
+
+function targetLanguage(languageCode) {
+  return TARGET_LANGUAGES[code(languageCode)] || "en";
+}
+
+function ttsVoice(languageCode, preferredVoice) {
+  const lang = code(languageCode);
+  const voiceSet = TTS_VOICES[lang] || TTS_VOICES.en;
+  const envName = `AZURE_TTS_VOICE_${lang.toUpperCase()}`;
+  return process.env[envName] || voiceSet[preferredVoice] || voiceSet.alloy;
+}
+
+function isUsefulText(text) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned) return false;
+  if (cleaned.length < 2) return false;
+  return /[\p{L}\p{N}]/u.test(cleaned);
+}
+
+function trimForSpeech(text) {
+  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+  if (cleaned.length <= MAX_TTS_CHARS) return cleaned;
+  return cleaned.slice(0, MAX_TTS_CHARS).replace(/\s+\S*$/, "");
+}
+
+function startContinuousRecognition(recognizer) {
+  return new Promise((resolve, reject) => {
+    recognizer.startContinuousRecognitionAsync(resolve, reject);
+  });
+}
+
+function stopContinuousRecognition(recognizer) {
+  return new Promise((resolve) => {
+    recognizer.stopContinuousRecognitionAsync(resolve, resolve);
+  });
+}
+
+function synthesizeText(speechKey, speechRegion, languageCode, preferredVoice, text) {
+  return new Promise((resolve, reject) => {
+    const speechConfig = speechsdk.SpeechConfig.fromSubscription(speechKey, speechRegion);
+    speechConfig.speechSynthesisLanguage = speechLocale(languageCode);
+    speechConfig.speechSynthesisVoiceName = ttsVoice(languageCode, preferredVoice);
+    speechConfig.speechSynthesisOutputFormat = speechsdk.SpeechSynthesisOutputFormat.Raw24Khz16BitMonoPcm;
+
+    const synthesizer = new speechsdk.SpeechSynthesizer(speechConfig, null);
+    synthesizer.speakTextAsync(
+      text,
+      (result) => {
+        synthesizer.close();
+        if (result.reason === speechsdk.ResultReason.SynthesizingAudioCompleted && result.audioData) {
+          resolve(Buffer.from(result.audioData));
+          return;
+        }
+        reject(new Error(result.errorDetails || `TTS failed with reason ${result.reason}`));
+      },
+      (error) => {
+        synthesizer.close();
+        reject(new Error(String(error)));
+      },
+    );
+  });
+}
+
+async function createBotToken({ apiKey, apiSecret, roomName, identity }) {
+  const token = new AccessToken(apiKey, apiSecret, {
+    identity,
+    name: "Vaani Translator",
+    ttl: "30m",
+    metadata: JSON.stringify({ roomName, role: "translator" }),
+  });
+  token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true, canPublishData: true });
+  return token.toJwt();
+}
+
+class DirectionPipeline {
+  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, speechKey, speechRegion }) {
+    this.callId = callId;
+    this.label = label;
+    this.outputSource = outputSource;
+    this.speechKey = speechKey;
+    this.speechRegion = speechRegion;
+    this.sourceLanguage = code(sourceLanguage);
+    this.targetLanguage = code(outputLanguage);
+    this.voice = voice || "alloy";
+    this.inputResampler = new AudioResampler(LIVEKIT_RATE, SPEECH_INPUT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
+    this.outputResampler = new AudioResampler(TTS_OUTPUT_RATE, LIVEKIT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
+    this.pushStream = null;
+    this.recognizer = null;
+    this.active = false;
+    this.state = "idle";
+    this.inputFrames = 0;
+    this.outputFrames = 0;
+    this.recognizedCount = 0;
+    this.synthesizedCount = 0;
+    this.lastInputAt = 0;
+    this.lastRecognizedAt = 0;
+    this.lastOutputAt = 0;
+    this.lastSourceText = "";
+    this.lastTranslatedText = "";
+    this.lastError = "";
+    this.outputChain = Promise.resolve();
+  }
+
+  async start() {
+    if (this.active) return;
+    const format = speechsdk.AudioStreamFormat.getWaveFormatPCM(SPEECH_INPUT_RATE, 16, CHANNELS);
+    this.pushStream = speechsdk.AudioInputStream.createPushStream(format);
+    const audioConfig = speechsdk.AudioConfig.fromStreamInput(this.pushStream);
+    const translationConfig = speechsdk.SpeechTranslationConfig.fromSubscription(this.speechKey, this.speechRegion);
+    translationConfig.speechRecognitionLanguage = speechLocale(this.sourceLanguage);
+    translationConfig.addTargetLanguage(targetLanguage(this.targetLanguage));
+    translationConfig.voiceName = ttsVoice(this.targetLanguage, this.voice);
+    translationConfig.speechSynthesisOutputFormat = speechsdk.SpeechSynthesisOutputFormat.Raw24Khz16BitMonoPcm;
+    translationConfig.outputFormat = speechsdk.OutputFormat.Simple;
+
+    this.recognizer = new speechsdk.TranslationRecognizer(translationConfig, audioConfig);
+    this.recognizer.recognizing = (_sender, event) => this.handleRecognizing(event);
+    this.recognizer.recognized = (_sender, event) => this.handleRecognized(event);
+    this.recognizer.canceled = (_sender, event) => this.handleCanceled(event);
+    this.recognizer.synthesizing = (_sender, event) => this.handleSynthesizing(event);
+    this.recognizer.sessionStarted = () => {
+      this.state = "listening";
+    };
+    this.recognizer.sessionStopped = () => {
+      if (this.active) this.state = "stopped";
+    };
+
+    await startContinuousRecognition(this.recognizer);
+    this.active = true;
+    this.state = "listening";
+  }
+
+  handleRecognizing(event) {
+    const translated = event.result?.translations?.get(targetLanguage(this.targetLanguage));
+    if (isUsefulText(translated)) {
+      this.lastTranslatedText = translated;
+      this.state = "recognizing";
+    }
+  }
+
+  handleRecognized(event) {
+    const result = event.result;
+    if (!result || result.reason !== speechsdk.ResultReason.TranslatedSpeech) return;
+    const translated = trimForSpeech(result.translations?.get(targetLanguage(this.targetLanguage)));
+    if (!isUsefulText(translated)) return;
+    this.recognizedCount += 1;
+    this.lastRecognizedAt = Date.now();
+    this.lastSourceText = result.text || "";
+    this.lastTranslatedText = translated;
+    this.state = "translated";
+    console.log(`Azure Speech translated ${this.callId}/${this.label}:`, { source: this.lastSourceText, translated });
+  }
+
+  handleCanceled(event) {
+    this.state = "failed";
+    this.lastError = event.errorDetails || event.reason || "Azure Speech recognition canceled";
+    console.error(`Azure Speech translation canceled ${this.callId}/${this.label}`, this.lastError);
+  }
+
+  handleInputFrame(frame) {
+    if (!this.active || !this.pushStream) return;
+    try {
+      const resampledFrames = this.inputResampler.push(makeFrame(frame.data, LIVEKIT_RATE));
+      for (const resampled of resampledFrames) {
+        this.pushStream.write(pcmBuffer(resampled.data).buffer.slice(pcmBuffer(resampled.data).byteOffset, pcmBuffer(resampled.data).byteOffset + pcmBuffer(resampled.data).byteLength));
+      }
+      this.inputFrames += 1;
+      this.lastInputAt = Date.now();
+      if (this.state === "idle") this.state = "listening";
+    } catch (error) {
+      this.state = "failed";
+      this.lastError = error.message || String(error);
+      console.error(`Azure Speech input failed ${this.callId}/${this.label}`, error);
+    }
+  }
+
+  handleSynthesizing(event) {
+    const result = event.result;
+    if (!result?.audio || result.audio.byteLength === 0) return;
+    if (
+      result.reason !== speechsdk.ResultReason.SynthesizingAudio &&
+      result.reason !== speechsdk.ResultReason.SynthesizingAudioCompleted
+    ) {
+      return;
+    }
+    this.outputChain = this.outputChain
+      .then(async () => {
+        const audio = Buffer.from(result.audio);
+        const samples = bufferToPcm16(audio);
+        const resampledFrames = this.outputResampler.push(makeFrame(samples, TTS_OUTPUT_RATE));
+        for (const frame of resampledFrames) {
+          await this.outputSource.captureFrame(frame);
+          this.outputFrames += 1;
+        }
+        if (result.reason === speechsdk.ResultReason.SynthesizingAudioCompleted) {
+          for (const frame of this.outputResampler.flush()) {
+            await this.outputSource.captureFrame(frame);
+            this.outputFrames += 1;
+          }
+          this.synthesizedCount += 1;
+          this.state = "listening";
+        } else {
+          this.state = "speaking_translation";
+        }
+        this.lastOutputAt = Date.now();
+      })
+      .catch((error) => {
+        this.state = "failed";
+        this.lastError = error.message || String(error);
+        console.error(`Azure Speech synthesized audio publish failed ${this.callId}/${this.label}`, error);
+      });
+  }
+
+  async stop() {
+    this.active = false;
+    try {
+      this.pushStream?.close();
+    } catch (_) {
+      // Ignore stream close races.
+    }
+    try {
+      if (this.recognizer) await stopContinuousRecognition(this.recognizer);
+      this.recognizer?.close();
+      this.inputResampler.close();
+      this.outputResampler.close();
+      await this.outputChain;
+    } catch (error) {
+      console.error(`Azure Speech direction cleanup failed ${this.callId}/${this.label}`, error);
+    }
+  }
+
+  status() {
+    return {
+      active: this.active,
+      state: this.state,
+      sourceLanguage: this.sourceLanguage,
+      targetLanguage: this.targetLanguage,
+      inputFrames: this.inputFrames,
+      outputFrames: this.outputFrames,
+      recognizedCount: this.recognizedCount,
+      synthesizedCount: this.synthesizedCount,
+      lastInputAt: this.lastInputAt,
+      lastRecognizedAt: this.lastRecognizedAt,
+      lastOutputAt: this.lastOutputAt,
+      lastSourceText: this.lastSourceText,
+      lastTranslatedText: this.lastTranslatedText,
+      lastError: this.lastError,
+    };
+  }
+}
+
+class LiveKitTranslationSession {
+  constructor({ call, livekitUrl, apiKey, apiSecret, speechKey, speechRegion }) {
+    this.call = call;
+    this.callId = call.callId;
+    this.livekitUrl = livekitUrl;
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
+    this.speechKey = speechKey;
+    this.speechRegion = speechRegion;
+    this.identity = `${BOT_PREFIX}-${this.callId}`;
+    this.room = new Room();
+    this.active = false;
+    this.lastError = "";
+    this.streamReaders = new Map();
+
+    this.toCallerSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
+    this.toCalleeSource = new AudioSource(LIVEKIT_RATE, CHANNELS, 2000);
+    this.toCallerTrack = LocalAudioTrack.createAudioTrack(`translated-to-${call.callerUid}`, this.toCallerSource);
+    this.toCalleeTrack = LocalAudioTrack.createAudioTrack(`translated-to-${call.calleeUid}`, this.toCalleeSource);
+
+    this.callerToCallee = new DirectionPipeline({
+      callId: this.callId,
+      label: "caller-to-callee",
+      sourceLanguage: call.callerSpokenLanguage || call.callerLanguage || "en",
+      targetLanguage: call.calleeListenLanguage || call.calleeLanguage || "en",
+      voice: call.calleeVoice || "alloy",
+      outputSource: this.toCalleeSource,
+      speechKey: this.speechKey,
+      speechRegion: this.speechRegion,
+    });
+    this.calleeToCaller = new DirectionPipeline({
+      callId: this.callId,
+      label: "callee-to-caller",
+      sourceLanguage: call.calleeSpokenLanguage || call.calleeLanguage || "en",
+      targetLanguage: call.callerListenLanguage || call.callerLanguage || "en",
+      voice: call.callerVoice || "alloy",
+      outputSource: this.toCallerSource,
+      speechKey: this.speechKey,
+      speechRegion: this.speechRegion,
+    });
+  }
+
+  async start() {
+    if (this.active) return;
+    await Promise.all([this.callerToCallee.start(), this.calleeToCaller.start()]);
+
+    this.room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+      this.attachRemoteAudio(track, publication, participant);
+    });
+    this.room.on(RoomEvent.TrackPublished, (publication, participant) => {
+      this.maybeSubscribe(publication, participant);
+    });
+    this.room.once(RoomEvent.Disconnected, () => {
+      this.active = false;
+    });
+
+    const token = await createBotToken({
+      apiKey: this.apiKey,
+      apiSecret: this.apiSecret,
+      roomName: this.callId,
+      identity: this.identity,
+    });
+    console.log(`Azure Speech translator connecting ${this.callId} as ${this.identity}`);
+    this.active = true;
+    await this.room.connect(this.livekitUrl, token, { autoSubscribe: true, dynacast: false });
+    console.log(`Azure Speech translator connected ${this.callId}`);
+
+    const options = new TrackPublishOptions();
+    options.source = TrackSource.SOURCE_MICROPHONE;
+    await this.room.localParticipant.publishTrack(this.toCallerTrack, options);
+    await this.room.localParticipant.publishTrack(this.toCalleeTrack, options);
+    console.log(`Azure Speech translator tracks published ${this.callId}`);
+    for (const participant of this.room.remoteParticipants.values()) {
+      for (const publication of participant.trackPublications.values()) {
+        this.maybeSubscribe(publication, participant);
+      }
+    }
+  }
+
+  maybeSubscribe(publication, participant) {
+    if (!participant || participant.identity === this.identity) return;
+    if (publication.kind !== TrackKind.KIND_AUDIO) return;
+    if (participant.identity !== this.call.callerUid && participant.identity !== this.call.calleeUid) return;
+    try {
+      publication.setSubscribed(true);
+    } catch (error) {
+      this.lastError = error.message || String(error);
+      console.error(`Translator subscribe failed ${this.callId}`, error);
+    }
+  }
+
+  attachRemoteAudio(track, publication, participant) {
+    if (!track || !publication || !participant) return;
+    if (participant.identity === this.identity) return;
+    if (participant.identity !== this.call.callerUid && participant.identity !== this.call.calleeUid) return;
+    if (publication.kind !== TrackKind.KIND_AUDIO) return;
+
+    const key = `${participant.identity}:${publication.sid || track.sid || publication.name}`;
+    if (this.streamReaders.has(key)) return;
+
+    const direction = participant.identity === this.call.callerUid ? this.callerToCallee : this.calleeToCaller;
+    console.log(`Azure Speech translator attached audio ${this.callId}/${participant.identity}`);
+    const stream = new AudioStream(track, LIVEKIT_RATE, CHANNELS);
+    const reader = stream.getReader();
+    this.streamReaders.set(key, reader);
+
+    void (async () => {
+      try {
+        while (this.active) {
+          const { value, done } = await reader.read();
+          if (done || !value) break;
+          direction.handleInputFrame(value);
+        }
+      } catch (error) {
+        if (this.active) {
+          this.lastError = error.message || String(error);
+          console.error(`Translator audio stream failed ${this.callId}/${participant.identity}`, error);
+        }
+      } finally {
+        this.streamReaders.delete(key);
+        try {
+          reader.releaseLock();
+        } catch (_) {
+          // Reader may already be released by cancellation.
+        }
+      }
+    })();
+  }
+
+  async stop() {
+    this.active = false;
+    for (const reader of this.streamReaders.values()) {
+      try {
+        await reader.cancel();
+      } catch (_) {
+        // Ignore cancellation races while the room is disconnecting.
+      }
+    }
+    this.streamReaders.clear();
+    await Promise.allSettled([this.callerToCallee.stop(), this.calleeToCaller.stop()]);
+    await Promise.allSettled([this.toCallerTrack.close(), this.toCalleeTrack.close()]);
+    await Promise.allSettled([this.toCallerSource.close(), this.toCalleeSource.close()]);
+    try {
+      await this.room.disconnect();
+    } catch (error) {
+      console.error(`Translator room disconnect failed ${this.callId}`, error);
+    }
+  }
+
+  status() {
+    return {
+      active: this.active,
+      provider: "azure-speech-translation",
+      participant: this.identity,
+      streamReaders: this.streamReaders.size,
+      lastError: this.lastError,
+      callerToCallee: this.callerToCallee.status(),
+      calleeToCaller: this.calleeToCaller.status(),
+    };
+  }
+}
+
+export class TranslationManager {
+  constructor({ livekitUrl, apiKey, apiSecret, speechKey, speechRegion }) {
+    this.livekitUrl = livekitUrl;
+    this.apiKey = apiKey;
+    this.apiSecret = apiSecret;
+    this.speechKey = speechKey;
+    this.speechRegion = speechRegion;
+    this.sessions = new Map();
+  }
+
+  async start(call) {
+    if (!this.livekitUrl || !this.apiKey || !this.apiSecret) {
+      console.warn("LiveKit translation is disabled because LiveKit config is missing.");
+      return null;
+    }
+    if (!this.speechKey || !this.speechRegion) {
+      console.warn("Azure Speech translation is disabled because AZURE_SPEECH_KEY or AZURE_SPEECH_REGION is missing.");
+      return null;
+    }
+    if (this.sessions.has(call.callId)) return this.sessions.get(call.callId);
+    const session = new LiveKitTranslationSession({
+      call,
+      livekitUrl: this.livekitUrl,
+      apiKey: this.apiKey,
+      apiSecret: this.apiSecret,
+      speechKey: this.speechKey,
+      speechRegion: this.speechRegion,
+    });
+    this.sessions.set(call.callId, session);
+    try {
+      await session.start();
+      return session;
+    } catch (error) {
+      this.sessions.delete(call.callId);
+      await session.stop().catch(() => {});
+      throw error;
+    }
+  }
+
+  async stop(callId) {
+    const session = this.sessions.get(callId);
+    if (!session) return;
+    this.sessions.delete(callId);
+    await session.stop();
+  }
+
+  status(callId) {
+    if (callId) return this.sessions.get(callId)?.status() || { active: false };
+    return {
+      provider: "azure-speech-translation",
+      activeSessions: this.sessions.size,
+      configured: Boolean(this.speechKey && this.speechRegion),
+      calls: Array.from(this.sessions.keys()),
+    };
+  }
+}

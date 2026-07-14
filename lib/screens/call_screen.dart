@@ -40,13 +40,16 @@ class _CallScreenState extends State<CallScreen> {
   String _mediaStatus = 'Connecting call...';
   LiveKitJoinInfo? _joinInfo;
   StreamSubscription<VaaniCall?>? _callSubscription;
+  CancelListenFunc? _roomEventSubscription;
   bool _leavingCall = false;
+  bool _translatedTrackReady = false;
 
   @override
   void initState() {
     super.initState();
     unawaited(NotificationService.instance.cancelIncomingCall(widget.callId));
     _room.addListener(_onRoomChanged);
+    _roomEventSubscription = _room.events.listen(_onRoomEvent);
     _callSubscription = _callService
         .watchCall(widget.callId)
         .listen(_onCallChanged);
@@ -57,8 +60,18 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _onRoomChanged() {
+    _applyTranslationSubscriptions();
     if (!mounted) return;
     setState(() {});
+  }
+
+  void _onRoomEvent(RoomEvent event) {
+    if (event is ParticipantConnectedEvent ||
+        event is TrackPublishedEvent ||
+        event is TrackSubscribedEvent ||
+        event is TrackUnsubscribedEvent) {
+      _applyTranslationSubscriptions();
+    }
   }
 
   void _onCallChanged(VaaniCall? call) {
@@ -89,6 +102,7 @@ class _CallScreenState extends State<CallScreen> {
 
       setState(() => _mediaStatus = 'Connecting LiveKit room...');
       await _room.connect(joinInfo.url, joinInfo.token);
+      _applyTranslationSubscriptions();
 
       await _room.localParticipant?.setMicrophoneEnabled(true);
       await Hardware.instance.setSpeakerphoneOn(true);
@@ -98,7 +112,9 @@ class _CallScreenState extends State<CallScreen> {
           _roomConnected = true;
           _muted = false;
           _speakerOn = true;
-          _mediaStatus = 'Connected to ${joinInfo.roomName}';
+          _mediaStatus = _translatedTrackReady
+              ? 'Translation connected'
+              : 'Connected, preparing translation...';
         });
       }
     } catch (error) {
@@ -110,6 +126,45 @@ class _CallScreenState extends State<CallScreen> {
     } finally {
       if (mounted) {
         setState(() => _connectingRoom = false);
+      }
+    }
+  }
+
+  void _applyTranslationSubscriptions() {
+    final identity = _joinInfo?.identity;
+    if (identity == null || identity.isEmpty) return;
+
+    final translatorIdentity = 'translator-${widget.callId}';
+    final targetTrackName = 'translated-to-$identity';
+    var hasTranslatedTrack = false;
+
+    for (final participant in _room.remoteParticipants.values) {
+      final isTranslator = participant.identity == translatorIdentity;
+      for (final publication in participant.trackPublications.values) {
+        if (publication.kind != TrackType.AUDIO) continue;
+
+        if (isTranslator) {
+          final shouldSubscribe = publication.name == targetTrackName;
+          if (shouldSubscribe) hasTranslatedTrack = true;
+          if (shouldSubscribe && !publication.subscribed) {
+            unawaited(publication.subscribe());
+          } else if (!shouldSubscribe && publication.subscribed) {
+            unawaited(publication.unsubscribe());
+          }
+        } else if (participant.identity != identity && publication.subscribed) {
+          unawaited(publication.unsubscribe());
+        }
+      }
+    }
+
+    if (hasTranslatedTrack != _translatedTrackReady) {
+      _translatedTrackReady = hasTranslatedTrack;
+      if (mounted) {
+        setState(() {
+          _mediaStatus = hasTranslatedTrack
+              ? 'Translation connected'
+              : 'Connected, preparing translation...';
+        });
       }
     }
   }
@@ -155,6 +210,7 @@ class _CallScreenState extends State<CallScreen> {
     try {
       await NotificationService.instance.cancelIncomingCall(widget.callId);
       await _room.disconnect();
+      _translatedTrackReady = false;
       if (notifyBackend) {
         await _callService.endCall(widget.callId);
       }
@@ -168,6 +224,8 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void dispose() {
     _callSubscription?.cancel();
+    final cancelRoomEvents = _roomEventSubscription;
+    if (cancelRoomEvents != null) unawaited(cancelRoomEvents());
     _room.removeListener(_onRoomChanged);
     _room.disconnect();
     super.dispose();

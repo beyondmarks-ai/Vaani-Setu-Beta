@@ -9,6 +9,7 @@ import { WebSocketServer } from "ws";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getMessaging } from "firebase-admin/messaging";
 import { TranslationPipeline } from "./openaiRealtime.js";
+import { TranslationManager } from "./livekitTranslation.js";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -27,10 +28,40 @@ const VAANI_PREFIX = "0209";
 const WEB_PUBSUB_CONNECTION_STRING = process.env.WEB_PUBSUB_CONNECTION_STRING || "";
 const WEB_PUBSUB_HUB = process.env.WEB_PUBSUB_HUB || "vaani";
 const FIREBASE_SERVICE_ACCOUNT_BASE64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || "";
+const AZURE_SPEECH_KEY = process.env.AZURE_SPEECH_KEY || "";
+const AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "";
+
+const SUPPORTED_LANGUAGES = [
+  { code: "en", name: "English" },
+  { code: "hi", name: "Hindi" },
+  { code: "te", name: "Telugu" },
+  { code: "ta", name: "Tamil" },
+  { code: "kn", name: "Kannada" },
+  { code: "ml", name: "Malayalam" },
+  { code: "mr", name: "Marathi" },
+  { code: "bn", name: "Bengali" },
+  { code: "gu", name: "Gujarati" },
+  { code: "pa", name: "Punjabi" },
+  { code: "ur", name: "Urdu" },
+];
+const SUPPORTED_VOICES = [
+  { id: "alloy", name: "Alloy" },
+  { id: "echo", name: "Echo" },
+  { id: "shimmer", name: "Shimmer" },
+];
+const DEFAULT_VOICE = "alloy";
+
 const pubsub = WEB_PUBSUB_CONNECTION_STRING
   ? new WebPubSubServiceClient(WEB_PUBSUB_CONNECTION_STRING, WEB_PUBSUB_HUB)
   : null;
 const messaging = createMessaging();
+const translationManager = new TranslationManager({
+  livekitUrl: LIVEKIT_URL,
+  apiKey: LIVEKIT_API_KEY,
+  apiSecret: LIVEKIT_API_SECRET,
+  speechKey: AZURE_SPEECH_KEY,
+  speechRegion: AZURE_SPEECH_REGION,
+});
 
 let store;
 
@@ -120,6 +151,14 @@ class AzureTableStore {
     return user;
   }
 
+  async updateUser(uid, updates) {
+    const current = await this.getUser(uid);
+    if (!current) return null;
+    const next = { ...current, ...updates, updatedAt: nowIso() };
+    await this.users.updateEntity({ partitionKey: "user", rowKey: uid, ...next }, "Merge");
+    return next;
+  }
+
   async reserveNumber(suffix, uid, number) {
     await this.numbers.createEntity({ partitionKey: "number", rowKey: suffix, suffix, uid, number, createdAt: nowIso() });
   }
@@ -196,6 +235,14 @@ class MemoryStore {
     this.users.set(user.uid, user);
     this.emailIndex.set(user.email, user.uid);
     return user;
+  }
+
+  async updateUser(uid, updates) {
+    const current = this.users.get(uid);
+    if (!current) return null;
+    const next = { ...current, ...updates, updatedAt: nowIso() };
+    this.users.set(uid, next);
+    return next;
   }
 
   async reserveNumber(suffix, uid, number) {
@@ -290,6 +337,20 @@ function cleanCallId(value) {
   return value;
 }
 
+function cleanLanguage(value, fieldName) {
+  if (typeof value !== "string") throwHttp(400, `${fieldName} is required.`);
+  const code = value.trim().toLowerCase();
+  if (!SUPPORTED_LANGUAGES.some((language) => language.code === code)) throwHttp(400, `Unsupported ${fieldName}.`);
+  return code;
+}
+
+function cleanVoice(value) {
+  if (typeof value !== "string") return DEFAULT_VOICE;
+  const voice = value.trim().toLowerCase();
+  if (!SUPPORTED_VOICES.some((item) => item.id === voice)) throwHttp(400, "Unsupported voice.");
+  return voice;
+}
+
 function throwHttp(status, message) {
   const error = new Error(message);
   error.status = status;
@@ -314,6 +375,7 @@ function publicProfile(user) {
     number: user.number,
     spokenLanguage: user.spokenLanguage || DEFAULT_LANGUAGE,
     listenLanguage: user.listenLanguage || DEFAULT_LANGUAGE,
+    preferredVoice: user.preferredVoice || DEFAULT_VOICE,
   };
 }
 
@@ -486,7 +548,19 @@ function notifyCallUpdate(callData) {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, build: "call-update-fix-20260712-1", activeCalls: calls.size, auth: "azure-jwt", store: store.constructor.name, pubsub: Boolean(pubsub), push: Boolean(messaging) });
+  res.json({
+    ok: true,
+    build: "azure-speech-translation-20260714-1",
+    activeCalls: calls.size,
+    activeTranslations: translationManager.status().activeSessions,
+    auth: "azure-jwt",
+    store: store.constructor.name,
+    pubsub: Boolean(pubsub),
+    push: Boolean(messaging),
+    translation: true,
+    translationProvider: translationManager.status().provider,
+    speechConfigured: translationManager.status().configured,
+  });
 });
 
 app.post("/api/auth/register", async (req, res, next) => {
@@ -508,6 +582,7 @@ app.post("/api/auth/register", async (req, res, next) => {
       number: assigned.number,
       spokenLanguage: DEFAULT_LANGUAGE,
       listenLanguage: DEFAULT_LANGUAGE,
+      preferredVoice: DEFAULT_VOICE,
       createdAt: nowIso(),
       updatedAt: nowIso(),
     };
@@ -534,6 +609,31 @@ app.get("/api/me", async (req, res, next) => {
   try {
     const user = await requireUser(req);
     res.json({ profile: publicProfile(user) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/api/me", async (req, res, next) => {
+  try {
+    const user = await requireUser(req);
+    const updates = {
+      spokenLanguage: cleanLanguage(req.body?.spokenLanguage, "spoken language"),
+      listenLanguage: cleanLanguage(req.body?.listenLanguage, "listening language"),
+      preferredVoice: cleanVoice(req.body?.preferredVoice),
+    };
+    const updated = await store.updateUser(user.uid, updates);
+    if (!updated) throwHttp(404, "User not found.");
+    res.json({ profile: publicProfile(updated) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/translation/options", async (req, res, next) => {
+  try {
+    await requireUser(req);
+    res.json({ languages: SUPPORTED_LANGUAGES, voices: SUPPORTED_VOICES, defaultVoice: DEFAULT_VOICE });
   } catch (error) {
     next(error);
   }
@@ -598,8 +698,14 @@ app.post("/api/calls", async (req, res, next) => {
       calleeNumber: callee.number,
       callerSuffix: caller.suffix,
       calleeSuffix: callee.suffix,
-      callerLanguage: caller.listenLanguage || caller.spokenLanguage || DEFAULT_LANGUAGE,
-      calleeLanguage: callee.listenLanguage || callee.spokenLanguage || DEFAULT_LANGUAGE,
+      callerLanguage: caller.spokenLanguage || DEFAULT_LANGUAGE,
+      calleeLanguage: callee.spokenLanguage || DEFAULT_LANGUAGE,
+      callerSpokenLanguage: caller.spokenLanguage || DEFAULT_LANGUAGE,
+      callerListenLanguage: caller.listenLanguage || DEFAULT_LANGUAGE,
+      calleeSpokenLanguage: callee.spokenLanguage || DEFAULT_LANGUAGE,
+      calleeListenLanguage: callee.listenLanguage || DEFAULT_LANGUAGE,
+      callerVoice: caller.preferredVoice || DEFAULT_VOICE,
+      calleeVoice: callee.preferredVoice || DEFAULT_VOICE,
       status: "ringing",
       createdAt: nowIso(),
       updatedAt: nowIso(),
@@ -641,6 +747,9 @@ app.post("/api/calls/:callId/accept", async (req, res, next) => {
 
     const updatedCall = await store.updateCall(callId, { status: "accepted", acceptedAt: nowIso() });
     notifyCallUpdate(updatedCall);
+    translationManager.start(updatedCall).catch((error) => {
+      console.error(`LiveKit translation failed to start for ${callId}`, error);
+    });
     const token = await createLiveKitJoinToken({ roomName: callId, identity: user.uid, name: call.calleeNumber, role: "callee" });
     res.json({
       callId,
@@ -660,6 +769,7 @@ app.post("/api/calls/:callId/end", async (req, res, next) => {
     const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 40) : "ended";
     const updatedCall = await store.updateCall(callId, { status: "ended", endedBy: user.uid, endedReason: reason, endedAt: nowIso() });
     notifyCallUpdate(updatedCall);
+    await translationManager.stop(callId);
     cleanupCall(callId);
     res.json({ callId, status: "ended" });
   } catch (error) {
@@ -676,6 +786,17 @@ app.post("/api/calls/:callId/livekit-token", async (req, res, next) => {
     const displayName = role === "caller" ? call.callerNumber : call.calleeNumber;
     const token = await createLiveKitJoinToken({ roomName: callId, identity: user.uid, name: displayName, role });
     res.json({ url: LIVEKIT_URL, token, roomName: callId, identity: user.uid, role });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/calls/:callId/translation/status", async (req, res, next) => {
+  try {
+    const user = await requireUser(req);
+    const callId = cleanCallId(req.params.callId);
+    await getCallForParticipant(callId, user.uid);
+    res.json(translationManager.status(callId));
   } catch (error) {
     next(error);
   }

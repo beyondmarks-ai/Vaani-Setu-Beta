@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'translation_options.dart';
 import 'user_profile.dart';
 
 class AzureAuthState {
@@ -104,6 +105,48 @@ class AzureAuthService {
       body: jsonEncode(payload),
     );
     return _decodeResponse(response);
+  }
+
+  Future<Map<String, dynamic>> authorizedPatch(
+    String path,
+    Map<String, dynamic> payload,
+  ) async {
+    final token = _requireToken();
+    final response = await http.patch(
+      Uri.parse('$_bridgeUrl$path'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode(payload),
+    );
+    return _decodeResponse(response);
+  }
+
+  Future<TranslationOptions> fetchTranslationOptions() async {
+    final body = await authorizedGet('/api/translation/options');
+    return TranslationOptions.fromMap(body);
+  }
+
+  Future<void> updateProfile({
+    required String spokenLanguage,
+    required String listenLanguage,
+    required String preferredVoice,
+  }) async {
+    final body = await authorizedPatch('/api/me', {
+      'spokenLanguage': spokenLanguage,
+      'listenLanguage': listenLanguage,
+      'preferredVoice': preferredVoice,
+    });
+    final profile = UserNumberProfile.fromMap(
+      body['profile'] as Map<String, dynamic>? ?? <String, dynamic>{},
+    );
+    final currentToken = token;
+    if (currentToken == null) throw StateError('Sign in before continuing.');
+    await _saveSession(currentToken, profile);
+    _setState(
+      AzureAuthState(loading: false, token: currentToken, profile: profile),
+    );
   }
 
   Future<void> _authenticate(

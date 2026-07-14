@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../services/call_service.dart';
 import '../services/number_assignment_service.dart';
+import '../services/translation_options.dart';
 import 'call_screen.dart';
 
 class DialerScreen extends StatefulWidget {
@@ -22,7 +23,10 @@ class _DialerScreenState extends State<DialerScreen> {
   String _targetSuffix = '';
   String _status = 'Enter the last 2 digits to call';
   bool _checkingNumber = false;
+  bool _savingSettings = false;
 
+  UserNumberProfile get _profile =>
+      AzureAuthService.instance.profile ?? widget.profile;
   String get _targetNumber => '${NumberAssignmentService.prefix}$_targetSuffix';
 
   Future<void> _startCall() async {
@@ -34,7 +38,7 @@ class _DialerScreenState extends State<DialerScreen> {
       return;
     }
 
-    if (_targetSuffix == widget.profile.suffix) {
+    if (_targetSuffix == _profile.suffix) {
       setState(() => _status = 'You cannot call your own number');
       return;
     }
@@ -128,12 +132,166 @@ class _DialerScreenState extends State<DialerScreen> {
     await AzureAuthService.instance.signOut();
   }
 
+  Future<void> _openTranslationSettings() async {
+    final options = await _loadTranslationOptions();
+    if (!mounted) return;
+
+    var spokenLanguage = _profile.spokenLanguage;
+    var listenLanguage = _profile.listenLanguage;
+    var preferredVoice = _profile.preferredVoice;
+    final languageCodes = options.languages.map((item) => item.code).toSet();
+    final voiceIds = options.voices.map((item) => item.id).toSet();
+    if (!languageCodes.contains(spokenLanguage)) spokenLanguage = 'en';
+    if (!languageCodes.contains(listenLanguage)) listenLanguage = 'en';
+    if (!voiceIds.contains(preferredVoice)) {
+      preferredVoice = options.defaultVoice;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            Future<void> save() async {
+              setSheetState(() => _savingSettings = true);
+              try {
+                await AzureAuthService.instance.updateProfile(
+                  spokenLanguage: spokenLanguage,
+                  listenLanguage: listenLanguage,
+                  preferredVoice: preferredVoice,
+                );
+                if (context.mounted) Navigator.of(context).pop();
+                if (mounted) {
+                  setState(() => _status = 'Translation preferences saved');
+                }
+              } catch (error) {
+                if (mounted) {
+                  setState(() => _status = _friendlyError(error));
+                }
+              } finally {
+                if (mounted) setState(() => _savingSettings = false);
+              }
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  20,
+                  4,
+                  20,
+                  20 + MediaQuery.of(context).viewInsets.bottom,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Translation preferences',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF12332F),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _OptionDropdown(
+                      label: 'I speak',
+                      icon: Icons.record_voice_over_outlined,
+                      value: spokenLanguage,
+                      items: options.languages
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item.code,
+                              child: Text(item.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setSheetState(() => spokenLanguage = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _OptionDropdown(
+                      label: 'I want to hear',
+                      icon: Icons.hearing_outlined,
+                      value: listenLanguage,
+                      items: options.languages
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item.code,
+                              child: Text(item.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setSheetState(() => listenLanguage = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    _OptionDropdown(
+                      label: 'Voice',
+                      icon: Icons.graphic_eq,
+                      value: preferredVoice,
+                      items: options.voices
+                          .map(
+                            (item) => DropdownMenuItem(
+                              value: item.id,
+                              child: Text(item.name),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: (value) {
+                        if (value != null) {
+                          setSheetState(() => preferredVoice = value);
+                        }
+                      },
+                    ),
+                    const SizedBox(height: 18),
+                    FilledButton.icon(
+                      onPressed: _savingSettings ? null : save,
+                      icon: _savingSettings
+                          ? const SizedBox.square(
+                              dimension: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.save_outlined),
+                      label: const Text('Save preferences'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<TranslationOptions> _loadTranslationOptions() async {
+    try {
+      return await AzureAuthService.instance.fetchTranslationOptions();
+    } catch (_) {
+      return fallbackTranslationOptions;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Vaani Setu'),
         actions: [
+          IconButton(
+            tooltip: 'Translation preferences',
+            onPressed: _openTranslationSettings,
+            icon: const Icon(Icons.tune),
+          ),
           IconButton(
             tooltip: 'Sign out',
             onPressed: _signOut,
@@ -146,7 +304,9 @@ class _DialerScreenState extends State<DialerScreen> {
           padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
           child: Column(
             children: [
-              _OwnNumberCard(profile: widget.profile),
+              _OwnNumberCard(profile: _profile),
+              const SizedBox(height: 12),
+              _TranslationCard(profile: _profile),
               const SizedBox(height: 14),
               _NumberDisplay(
                 prefix: NumberAssignmentService.prefix,
@@ -256,6 +416,97 @@ class _OwnNumberCard extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _TranslationCard extends StatelessWidget {
+  const _TranslationCard({required this.profile});
+
+  final UserNumberProfile profile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE0E5DF)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 46,
+            height: 46,
+            decoration: BoxDecoration(
+              color: const Color(0xFFEAF5EF),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: const Icon(Icons.translate, color: Color(0xFF12834C)),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${languageName(profile.spokenLanguage)} to ${languageName(profile.listenLanguage)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF12332F),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Voice: ${voiceName(profile.preferredVoice)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF687570),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Icon(Icons.tune, color: Color(0xFF687570)),
+        ],
+      ),
+    );
+  }
+}
+
+class _OptionDropdown extends StatelessWidget {
+  const _OptionDropdown({
+    required this.label,
+    required this.icon,
+    required this.value,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String label;
+  final IconData icon;
+  final String value;
+  final List<DropdownMenuItem<String>> items;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: value,
+      items: items,
+      onChanged: onChanged,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16)),
       ),
     );
   }
