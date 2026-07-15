@@ -7,8 +7,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "lint": "node --check src/server.js && node --check src/openaiRealtime.js && node --check src/colloquialPostEditor.js && node --check src/livekitTranslation.js",
-    "test": "node test/colloquialPostEditor.test.js"
+    "lint": "node --check src/server.js && node --check src/livekitTranslation.js",
+    "test": "node test/sarvamTranslation.test.js"
   },
   "dependencies": {
     "@azure/data-tables": "^13.3.2",
@@ -18,7 +18,7 @@
     "firebase-admin": "^13.6.0",
     "jsonwebtoken": "^9.0.2",
     "livekit-server-sdk": "^2.17.0",
-    "microsoft-cognitiveservices-speech-sdk": "^1.50.0",
+    "sarvamai": "^1.1.7",
     "ws": "^8.18.3"
   }
 }

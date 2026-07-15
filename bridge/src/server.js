@@ -27,12 +27,10 @@ const VAANI_PREFIX = "0209";
 const WEB_PUBSUB_CONNECTION_STRING = process.env.WEB_PUBSUB_CONNECTION_STRING || "";
 const WEB_PUBSUB_HUB = process.env.WEB_PUBSUB_HUB || "vaani";
 const FIREBASE_SERVICE_ACCOUNT_BASE64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || "";
-const AZURE_SPEECH_KEY = process.env.AZURE_SPEECH_KEY || "";
-const AZURE_SPEECH_REGION = process.env.AZURE_SPEECH_REGION || "";
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY || "";
 
 const SUPPORTED_LANGUAGES = [
   { code: "en", name: "English (India)" },
-  { code: "as", name: "Assamese" },
   { code: "bn", name: "Bengali" },
   { code: "gu", name: "Gujarati" },
   { code: "hi", name: "Hindi" },
@@ -43,37 +41,27 @@ const SUPPORTED_LANGUAGES = [
   { code: "pa", name: "Punjabi" },
   { code: "ta", name: "Tamil" },
   { code: "te", name: "Telugu" },
-  { code: "ur", name: "Urdu" },
 ];
-const SUPPORTED_VOICES = [
-  { id: "en-IN-NeerjaNeural", name: "English - Neerja", languageCode: "en", gender: "Female" },
-  { id: "en-IN-PrabhatNeural", name: "English - Prabhat", languageCode: "en", gender: "Male" },
-  { id: "as-IN-YashicaNeural", name: "Assamese - Yashica", languageCode: "as", gender: "Female" },
-  { id: "as-IN-PriyomNeural", name: "Assamese - Priyom", languageCode: "as", gender: "Male" },
-  { id: "bn-IN-TanishaaNeural", name: "Bengali - Tanishaa", languageCode: "bn", gender: "Female" },
-  { id: "bn-IN-BashkarNeural", name: "Bengali - Bashkar", languageCode: "bn", gender: "Male" },
-  { id: "gu-IN-DhwaniNeural", name: "Gujarati - Dhwani", languageCode: "gu", gender: "Female" },
-  { id: "gu-IN-NiranjanNeural", name: "Gujarati - Niranjan", languageCode: "gu", gender: "Male" },
-  { id: "hi-IN-SwaraNeural", name: "Hindi - Swara", languageCode: "hi", gender: "Female" },
-  { id: "hi-IN-MadhurNeural", name: "Hindi - Madhur", languageCode: "hi", gender: "Male" },
-  { id: "kn-IN-SapnaNeural", name: "Kannada - Sapna", languageCode: "kn", gender: "Female" },
-  { id: "kn-IN-GaganNeural", name: "Kannada - Gagan", languageCode: "kn", gender: "Male" },
-  { id: "ml-IN-SobhanaNeural", name: "Malayalam - Sobhana", languageCode: "ml", gender: "Female" },
-  { id: "ml-IN-MidhunNeural", name: "Malayalam - Midhun", languageCode: "ml", gender: "Male" },
-  { id: "mr-IN-AarohiNeural", name: "Marathi - Aarohi", languageCode: "mr", gender: "Female" },
-  { id: "mr-IN-ManoharNeural", name: "Marathi - Manohar", languageCode: "mr", gender: "Male" },
-  { id: "or-IN-SubhasiniNeural", name: "Odia - Subhasini", languageCode: "or", gender: "Female" },
-  { id: "or-IN-SukantNeural", name: "Odia - Sukant", languageCode: "or", gender: "Male" },
-  { id: "pa-IN-VaaniNeural", name: "Punjabi - Vaani", languageCode: "pa", gender: "Female" },
-  { id: "pa-IN-OjasNeural", name: "Punjabi - Ojas", languageCode: "pa", gender: "Male" },
-  { id: "ta-IN-PallaviNeural", name: "Tamil - Pallavi", languageCode: "ta", gender: "Female" },
-  { id: "ta-IN-ValluvarNeural", name: "Tamil - Valluvar", languageCode: "ta", gender: "Male" },
-  { id: "te-IN-ShrutiNeural", name: "Telugu - Shruti", languageCode: "te", gender: "Female" },
-  { id: "te-IN-MohanNeural", name: "Telugu - Mohan", languageCode: "te", gender: "Male" },
-  { id: "ur-IN-GulNeural", name: "Urdu - Gul", languageCode: "ur", gender: "Female" },
-  { id: "ur-IN-SalmanNeural", name: "Urdu - Salman", languageCode: "ur", gender: "Male" },
+const SARVAM_SPEAKERS = [
+  { id: "simran", name: "Simran", gender: "Female" },
+  { id: "priya", name: "Priya", gender: "Female" },
+  { id: "kavya", name: "Kavya", gender: "Female" },
+  { id: "ritu", name: "Ritu", gender: "Female" },
+  { id: "ishita", name: "Ishita", gender: "Female" },
+  { id: "shubh", name: "Shubh", gender: "Male" },
+  { id: "aditya", name: "Aditya", gender: "Male" },
+  { id: "anand", name: "Anand", gender: "Male" },
+  { id: "rahul", name: "Rahul", gender: "Male" },
+  { id: "rohan", name: "Rohan", gender: "Male" },
 ];
-const DEFAULT_VOICE = "en-IN-NeerjaNeural";
+const SUPPORTED_VOICES = SUPPORTED_LANGUAGES.flatMap((language) =>
+  SARVAM_SPEAKERS.map((speaker) => ({
+    ...speaker,
+    name: `${language.name} - ${speaker.name}`,
+    languageCode: language.code,
+  })),
+);
+const DEFAULT_VOICE = "simran";
 
 const pubsub = WEB_PUBSUB_CONNECTION_STRING
   ? new WebPubSubServiceClient(WEB_PUBSUB_CONNECTION_STRING, WEB_PUBSUB_HUB)
@@ -83,8 +71,7 @@ const translationManager = new TranslationManager({
   livekitUrl: LIVEKIT_URL,
   apiKey: LIVEKIT_API_KEY,
   apiSecret: LIVEKIT_API_SECRET,
-  speechKey: AZURE_SPEECH_KEY,
-  speechRegion: AZURE_SPEECH_REGION,
+  sarvamApiKey: SARVAM_API_KEY,
 });
 
 let store;
@@ -376,8 +363,19 @@ function cleanVoice(value) {
   if (typeof value !== "string") return DEFAULT_VOICE;
   const voice = value.trim();
   if (["alloy", "echo", "shimmer"].includes(voice.toLowerCase())) return DEFAULT_VOICE;
+  if (/^[a-z]{2,3}-[A-Z]{2}-[A-Za-z0-9]+Neural$/.test(voice)) return DEFAULT_VOICE;
   if (!SUPPORTED_VOICES.some((item) => item.id === voice)) throwHttp(400, "Unsupported voice.");
   return voice;
+}
+
+function storedLanguage(value) {
+  const language = String(value || "").trim().toLowerCase();
+  return SUPPORTED_LANGUAGES.some((item) => item.code === language) ? language : DEFAULT_LANGUAGE;
+}
+
+function storedVoice(value) {
+  const voice = String(value || "").trim().toLowerCase();
+  return SARVAM_SPEAKERS.some((item) => item.id === voice) ? voice : DEFAULT_VOICE;
 }
 
 function cleanProtectedTerms(value) {
@@ -429,9 +427,9 @@ function publicProfile(user) {
     email: user.email,
     suffix: user.suffix,
     number: user.number,
-    spokenLanguage: user.spokenLanguage || DEFAULT_LANGUAGE,
-    listenLanguage: user.listenLanguage || DEFAULT_LANGUAGE,
-    preferredVoice: user.preferredVoice || DEFAULT_VOICE,
+    spokenLanguage: storedLanguage(user.spokenLanguage),
+    listenLanguage: storedLanguage(user.listenLanguage),
+    preferredVoice: storedVoice(user.preferredVoice),
     protectedTerms: parseJson(user.protectedTermsJson, []),
   };
 }
@@ -607,7 +605,7 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "colloquial-translation-20260714-1",
+    build: "sarvam-translation-20260714-2",
     activeCalls: translationManager.status().activeSessions,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",
@@ -617,6 +615,7 @@ app.get("/health", (_req, res) => {
     translation: true,
     translationProvider: translationManager.status().provider,
     speechConfigured: translationManager.status().configured,
+    sarvamConfigured: translationManager.status().configured,
     colloquialConfigured: translationManager.status().colloquialConfigured,
   });
 });
@@ -768,14 +767,14 @@ app.post("/api/calls", async (req, res, next) => {
       calleeNumber: callee.number,
       callerSuffix: caller.suffix,
       calleeSuffix: callee.suffix,
-      callerLanguage: caller.spokenLanguage || DEFAULT_LANGUAGE,
-      calleeLanguage: callee.spokenLanguage || DEFAULT_LANGUAGE,
-      callerSpokenLanguage: caller.spokenLanguage || DEFAULT_LANGUAGE,
-      callerListenLanguage: caller.listenLanguage || DEFAULT_LANGUAGE,
-      calleeSpokenLanguage: callee.spokenLanguage || DEFAULT_LANGUAGE,
-      calleeListenLanguage: callee.listenLanguage || DEFAULT_LANGUAGE,
-      callerVoice: caller.preferredVoice || DEFAULT_VOICE,
-      calleeVoice: callee.preferredVoice || DEFAULT_VOICE,
+      callerLanguage: storedLanguage(caller.spokenLanguage),
+      calleeLanguage: storedLanguage(callee.spokenLanguage),
+      callerSpokenLanguage: storedLanguage(caller.spokenLanguage),
+      callerListenLanguage: storedLanguage(caller.listenLanguage),
+      calleeSpokenLanguage: storedLanguage(callee.spokenLanguage),
+      calleeListenLanguage: storedLanguage(callee.listenLanguage),
+      callerVoice: storedVoice(caller.preferredVoice),
+      calleeVoice: storedVoice(callee.preferredVoice),
       callerProtectedTerms: parseJson(caller.protectedTermsJson, []),
       calleeProtectedTerms: parseJson(callee.protectedTermsJson, []),
       status: "ringing",
@@ -914,5 +913,3 @@ wss.on("connection", async (socket, req) => {
     socket.close(1008, "Unauthorized");
   }
 });
-
-

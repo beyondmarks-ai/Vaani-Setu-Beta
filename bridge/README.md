@@ -8,7 +8,7 @@ It handles:
 - Vaani call creation, accept, and end endpoints
 - Azure WebSocket call signaling at `/ws/calls`
 - LiveKit room token generation
-- optional Azure/OpenAI realtime translation plumbing
+- two-way Sarvam translation over LiveKit
 
 ## Local Install
 
@@ -30,18 +30,21 @@ LIVEKIT_URL
 LIVEKIT_API_KEY
 LIVEKIT_API_SECRET
 BRIDGE_JWT_SECRET
+SARVAM_API_KEY
 ```
 
-Optional realtime translation variables:
+Optional Sarvam tuning variables:
 
 ```text
-REALTIME_PROVIDER
-AZURE_OPENAI_ENDPOINT
-AZURE_OPENAI_REALTIME_DEPLOYMENT
-AZURE_OPENAI_REALTIME_API_VERSION
-AZURE_OPENAI_API_KEY
-OPENAI_API_KEY
+SARVAM_TRANSLATE_TIMEOUT_MS
+SARVAM_TTS_TIMEOUT_MS
+SARVAM_TTS_PACE
 ```
+
+The translation worker uses `saaras:v3` in same-language `transcribe`
+mode, `mayura:v1` in `modern-colloquial` mode, and streaming
+`bulbul:v3` speech. API keys stay on the backend and must never be bundled
+into the Flutter APK.
 
 ## Deploy
 

@@ -27,7 +27,7 @@ class UserNumberProfile {
       number: data['number'] as String? ?? '',
       spokenLanguage: data['spokenLanguage'] as String? ?? 'en',
       listenLanguage: data['listenLanguage'] as String? ?? 'en',
-      preferredVoice: data['preferredVoice'] as String? ?? 'en-IN-NeerjaNeural',
+      preferredVoice: data['preferredVoice'] as String? ?? 'simran',
       protectedTerms: (data['protectedTerms'] as List<dynamic>? ?? const [])
           .whereType<String>()
           .toList(growable: false),
