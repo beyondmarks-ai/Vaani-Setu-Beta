@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'api_response.dart';
 import 'translation_options.dart';
 import 'user_profile.dart';
 
@@ -26,7 +27,7 @@ class AzureAuthService {
   static const _bridgeUrl = String.fromEnvironment(
     'BRIDGE_URL',
     defaultValue:
-        'https://vaani-setu-bridge.wonderfulplant-f827f144.southindia.azurecontainerapps.io',
+        'https://vaani-setu-bridge.happycoast-2d2c0fea.centralindia.azurecontainerapps.io',
   );
 
   final StreamController<AzureAuthState> _stateController =
@@ -84,10 +85,12 @@ class AzureAuthService {
 
   Future<Map<String, dynamic>> authorizedGet(String path) async {
     final token = _requireToken();
-    final response = await http.get(
-      Uri.parse('$_bridgeUrl$path'),
-      headers: {'Authorization': 'Bearer $token'},
-    );
+    final response = await http
+        .get(
+          Uri.parse('$_bridgeUrl$path'),
+          headers: {'Authorization': 'Bearer $token'},
+        )
+        .timeout(const Duration(seconds: 60));
     return _decodeResponse(response);
   }
 
@@ -96,14 +99,16 @@ class AzureAuthService {
     Map<String, dynamic> payload,
   ) async {
     final token = _requireToken();
-    final response = await http.post(
-      Uri.parse('$_bridgeUrl$path'),
-      headers: {
-        'Authorization': 'Bearer $token',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(payload),
-    );
+    final response = await http
+        .post(
+          Uri.parse('$_bridgeUrl$path'),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 60));
     return _decodeResponse(response);
   }
 
@@ -112,14 +117,16 @@ class AzureAuthService {
     Map<String, dynamic> payload,
   ) async {
     final token = _requireToken();
-    final response = await http.patch(
-      Uri.parse('$_bridgeUrl$path'),
-      headers: {
-        'Authorization': 'Bearer $token',
-        'Content-Type': 'application/json',
-      },
-      body: jsonEncode(payload),
-    );
+    final response = await http
+        .patch(
+          Uri.parse('$_bridgeUrl$path'),
+          headers: {
+            'Authorization': 'Bearer $token',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode(payload),
+        )
+        .timeout(const Duration(seconds: 60));
     return _decodeResponse(response);
   }
 
@@ -151,6 +158,30 @@ class AzureAuthService {
     );
   }
 
+  Future<void> updateMessageLanguage(
+    String language, {
+    String? translationStyle,
+  }) async {
+    final current = profile;
+    if (current == null) throw StateError('Sign in before continuing.');
+    final body = await authorizedPatch('/api/me', {
+      'spokenLanguage': current.spokenLanguage,
+      'listenLanguage': current.listenLanguage,
+      'preferredVoice': current.preferredVoice,
+      'protectedTerms': current.protectedTerms,
+      'messageLanguage': language,
+      'messageTranslationStyle': ?translationStyle,
+    });
+    final updated = UserNumberProfile.fromMap(
+      body['profile'] as Map<String, dynamic>,
+    );
+    final currentToken = _requireToken();
+    await _saveSession(currentToken, updated);
+    _setState(
+      AzureAuthState(loading: false, token: currentToken, profile: updated),
+    );
+  }
+
   Future<void> _authenticate(
     String path, {
     required String email,
@@ -174,10 +205,12 @@ class AzureAuthService {
   }
 
   Future<UserNumberProfile> _fetchProfile(String token) async {
-    final response = await http.get(
-      Uri.parse('$_bridgeUrl/api/me'),
-      headers: {'Authorization': 'Bearer $token'},
-    );
+    final response = await http
+        .get(
+          Uri.parse('$_bridgeUrl/api/me'),
+          headers: {'Authorization': 'Bearer $token'},
+        )
+        .timeout(const Duration(seconds: 60));
     final body = _decodeResponse(response);
     return UserNumberProfile.fromMap(body['profile'] as Map<String, dynamic>);
   }
@@ -195,17 +228,8 @@ class AzureAuthService {
     return value;
   }
 
-  Map<String, dynamic> _decodeResponse(http.Response response) {
-    final body = response.body.isEmpty
-        ? <String, dynamic>{}
-        : jsonDecode(response.body) as Map<String, dynamic>;
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw StateError(
-        body['error'] as String? ?? 'Azure backend request failed.',
-      );
-    }
-    return body;
-  }
+  Map<String, dynamic> _decodeResponse(http.Response response) =>
+      decodeApiResponse(response);
 
   void _setState(AzureAuthState state) {
     _state = state;

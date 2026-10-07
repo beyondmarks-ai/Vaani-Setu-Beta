@@ -112,7 +112,7 @@ class _CallScreenState extends State<CallScreen> {
       _applyTranslationSubscriptions();
 
       await _room.localParticipant?.setMicrophoneEnabled(true);
-      await Hardware.instance.setSpeakerphoneOn(false);
+      await AudioManager.instance.setSpeakerOutputPreferred(false);
 
       if (mounted) {
         setState(() {
@@ -192,7 +192,7 @@ class _CallScreenState extends State<CallScreen> {
   Future<void> _toggleSpeaker() async {
     try {
       final nextSpeaker = !_speakerOn;
-      await Hardware.instance.setSpeakerphoneOn(nextSpeaker);
+      await AudioManager.instance.setSpeakerOutputPreferred(nextSpeaker);
       if (!mounted) return;
       setState(() => _speakerOn = nextSpeaker);
     } catch (error) {

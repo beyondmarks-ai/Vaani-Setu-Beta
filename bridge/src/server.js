@@ -1,4 +1,6 @@
 import crypto from "crypto";
+import { pathToFileURL } from "node:url";
+import { createTextTranslator, MAX_MESSAGE_LENGTH, historyPage, callHistoryEntry } from "./messages.js";
 import express from "express";
 import jwt from "jsonwebtoken";
 import { TableClient } from "@azure/data-tables";
@@ -26,6 +28,7 @@ const TOKEN_TTL = "30d";
 const VAANI_PREFIX = "0209";
 const WEB_PUBSUB_CONNECTION_STRING = process.env.WEB_PUBSUB_CONNECTION_STRING || "";
 const WEB_PUBSUB_HUB = process.env.WEB_PUBSUB_HUB || "vaani";
+const PUBLIC_BRIDGE_URL = process.env.BRIDGE_PUBLIC_URL || "";
 const FIREBASE_SERVICE_ACCOUNT_BASE64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || "";
 const SARVAM_API_KEY = process.env.SARVAM_API_KEY || "";
 
@@ -75,6 +78,7 @@ const translationManager = new TranslationManager({
 });
 
 let store;
+let translateMessage = createTextTranslator(SARVAM_API_KEY);
 
 function json(data) {
   return JSON.stringify(data);
@@ -122,12 +126,13 @@ function createStore() {
   return new MemoryStore();
 }
 
-class AzureTableStore {
+export class AzureTableStore {
   constructor(connectionString) {
     this.users = TableClient.fromConnectionString(connectionString, "VaaniUsers");
     this.emailIndex = TableClient.fromConnectionString(connectionString, "VaaniEmailIndex");
     this.numbers = TableClient.fromConnectionString(connectionString, "VaaniNumbers");
     this.calls = TableClient.fromConnectionString(connectionString, "VaaniCalls");
+    this.messages = TableClient.fromConnectionString(connectionString, "VaaniMessages");
     this.pushTokens = TableClient.fromConnectionString(connectionString, "VaaniPushTokens");
   }
 
@@ -137,6 +142,7 @@ class AzureTableStore {
       this.emailIndex.createTable().catch(ignoreConflict),
       this.numbers.createTable().catch(ignoreConflict),
       this.calls.createTable().catch(ignoreConflict),
+      this.messages.createTable().catch(ignoreConflict),
       this.pushTokens.createTable().catch(ignoreConflict),
     ]);
   }
@@ -195,6 +201,37 @@ class AzureTableStore {
     return next;
   }
 
+  async listCalls(uid) {
+    const safeUid = uid.replace(/'/g, "''");
+    const entities = this.calls.listEntities({ queryOptions: {
+      filter: `PartitionKey eq 'call' and (callerUid eq '${safeUid}' or calleeUid eq '${safeUid}')`,
+    } });
+    const result = [];
+    for await (const entity of entities) result.push(deserializeCall(entity));
+    return result;
+  }
+
+  async getMessage(senderUid, messageId) {
+    return getEntityOrNull(this.messages, senderUid, messageId);
+  }
+
+  async createMessage(message) {
+    await this.messages.createEntity({ partitionKey: message.senderUid, rowKey: message.messageId, ...message });
+  }
+
+  async listMessages(uid) {
+    const safeUid = uid.replace(/'/g, "''");
+    const entities = this.messages.listEntities({ queryOptions: {
+      filter: `senderUid eq '${safeUid}' or recipientUid eq '${safeUid}'`,
+    } });
+    const result = [];
+    for await (const entity of entities) {
+      const { partitionKey, rowKey, etag, timestamp, ...message } = entity;
+      result.push(message);
+    }
+    return result;
+  }
+
   async savePushToken(uid, token, platform) {
     await this.pushTokens.upsertEntity({
       partitionKey: uid,
@@ -217,12 +254,13 @@ class AzureTableStore {
   }
 }
 
-class MemoryStore {
+export class MemoryStore {
   constructor() {
     this.users = new Map();
     this.emailIndex = new Map();
     this.numbers = new Map();
     this.calls = new Map();
+    this.messages = new Map();
     this.pushTokens = new Map();
   }
 
@@ -283,6 +321,24 @@ class MemoryStore {
     const next = { ...current, ...updates, updatedAt: nowIso() };
     this.calls.set(callId, next);
     return next;
+  }
+
+  async listCalls(uid) {
+    return [...this.calls.values()].filter((call) => call.callerUid === uid || call.calleeUid === uid);
+  }
+
+  async getMessage(senderUid, messageId) {
+    return this.messages.get(`${senderUid}:${messageId}`) || null;
+  }
+
+  async createMessage(message) {
+    const key = `${message.senderUid}:${message.messageId}`;
+    if (this.messages.has(key)) throwHttp(409, "Message already exists.");
+    this.messages.set(key, message);
+  }
+
+  async listMessages(uid) {
+    return [...this.messages.values()].filter((message) => message.senderUid === uid || message.recipientUid === uid);
   }
 
   async savePushToken(uid, token, platform) {
@@ -429,6 +485,8 @@ function publicProfile(user) {
     number: user.number,
     spokenLanguage: storedLanguage(user.spokenLanguage),
     listenLanguage: storedLanguage(user.listenLanguage),
+    messageLanguage: storedLanguage(user.messageLanguage || user.listenLanguage),
+    messageTranslationStyle: user.messageTranslationStyle === "mixed" ? "mixed" : "pure",
     preferredVoice: storedVoice(user.preferredVoice),
     protectedTerms: parseJson(user.protectedTermsJson, []),
   };
@@ -452,7 +510,9 @@ function verifyUserToken(token) {
 async function requireUser(req) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!token) throwHttp(401, "Sign in before continuing.");
-  const claims = verifyUserToken(token);
+  let claims;
+  try { claims = verifyUserToken(token); }
+  catch (_) { throwHttp(401, "Session expired. Sign in again."); }
   const user = await store.getUser(claims.sub);
   if (!user) throwHttp(401, "Session expired. Sign in again.");
   return user;
@@ -605,7 +665,11 @@ function notifyCallUpdate(callData) {
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
-    build: "sarvam-translation-20260714-2",
+    build: "message-styles-20261007-1",
+    realtime: pubsub ? "azure-web-pubsub" : "websocket",
+    livekitConfigured: Boolean(LIVEKIT_URL && LIVEKIT_API_KEY && LIVEKIT_API_SECRET),
+    messaging: true,
+    callHistory: true,
     activeCalls: translationManager.status().activeSessions,
     activeTranslations: translationManager.status().activeSessions,
     auth: "azure-jwt",
@@ -675,7 +739,12 @@ app.get("/api/me", async (req, res, next) => {
 app.patch("/api/me", async (req, res, next) => {
   try {
     const user = await requireUser(req);
+    if (req.body?.messageTranslationStyle != null && !["pure", "mixed"].includes(req.body.messageTranslationStyle)) {
+      throwHttp(400, "Choose pure or mixed message translation.");
+    }
     const updates = {
+      ...(req.body?.messageTranslationStyle == null ? {} : { messageTranslationStyle: req.body.messageTranslationStyle }),
+      ...(req.body?.messageLanguage == null ? {} : { messageLanguage: cleanLanguage(req.body.messageLanguage, "message language") }),
       spokenLanguage: cleanLanguage(req.body?.spokenLanguage, "spoken language"),
       listenLanguage: cleanLanguage(req.body?.listenLanguage, "listening language"),
       preferredVoice: cleanVoice(req.body?.preferredVoice),
@@ -711,7 +780,18 @@ app.get("/api/translation/options", async (req, res, next) => {
 app.post("/api/realtime-token", async (req, res, next) => {
   try {
     const user = await requireUser(req);
-    if (!pubsub) throwHttp(500, "Azure Web PubSub is not configured.");
+    if (!pubsub) {
+      const forwardedProtocol = req.get("x-forwarded-proto")?.split(",")[0].trim();
+      const protocol = forwardedProtocol === "https" ? "https" : req.protocol;
+      const url = new URL("/ws/calls", PUBLIC_BRIDGE_URL || `${protocol}://${req.get("host")}`);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      const token = jwt.sign({ sub: user.uid }, APP_JWT_SECRET, {
+        expiresIn: "1h", audience: "vaani-setu-realtime", issuer: "vaani-setu-azure",
+      });
+      url.searchParams.set("token", token);
+      res.json({ url: url.toString(), expiresInMinutes: 60, transport: "websocket" });
+      return;
+    }
     const token = await pubsub.getClientAccessToken({
       userId: user.uid,
       expirationTimeInMinutes: 60,
@@ -758,6 +838,7 @@ app.post("/api/calls", async (req, res, next) => {
     const callee = await store.getUser(numberDoc.uid);
     if (!callee) throwHttp(404, "No user has that Vaani number yet.");
 
+    requireLiveKitConfig();
     const callId = crypto.randomUUID();
     const callData = {
       callId,
@@ -798,6 +879,88 @@ app.post("/api/calls", async (req, res, next) => {
   }
 });
 
+app.get("/api/calls", async (req, res, next) => {
+  try {
+    const user = await requireUser(req);
+    const calls = (await store.listCalls(user.uid)).map((call) => callHistoryEntry(call, user.uid));
+    res.json(historyPage(calls, req.query, "callId"));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/conversations", async (req, res, next) => {
+  try {
+    const user = await requireUser(req);
+    const messages = await store.listMessages(user.uid);
+    const latest = new Map();
+    for (const message of messages) {
+      const peer = message.senderUid === user.uid ? message.recipientNumber : message.senderNumber;
+      const previous = latest.get(peer);
+      if (!previous || `${message.createdAt}|${message.messageId}` > `${previous.createdAt}|${previous.messageId}`) latest.set(peer, message);
+    }
+    res.json({ items: [...latest].map(([remoteNumber, message]) => ({ remoteNumber, message }))
+      .sort((a, b) => b.message.createdAt.localeCompare(a.message.createdAt)) });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/messages/:suffix", async (req, res, next) => {
+  try {
+    const user = await requireUser(req);
+    const suffix = cleanSuffix(req.params.suffix);
+    const peer = await store.getNumber(suffix);
+    if (!peer) throwHttp(404, "No user has that Vaani number yet.");
+    const messages = (await store.listMessages(user.uid)).filter((message) =>
+      message.senderUid === peer.uid || message.recipientUid === peer.uid);
+    res.json(historyPage(messages, req.query, "messageId"));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/messages", async (req, res, next) => {
+  try {
+    const sender = await requireUser(req);
+    const suffix = cleanSuffix(req.body?.targetSuffix);
+    if (suffix === sender.suffix) throwHttp(400, "You cannot message your own number.");
+    const originalText = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+    if (!originalText || originalText.length > MAX_MESSAGE_LENGTH) throwHttp(400, `Messages must contain 1-${MAX_MESSAGE_LENGTH} characters.`);
+    const sourceLanguage = cleanLanguage(req.body?.sourceLanguage, "message source language");
+    const messageId = req.body?.messageId;
+    if (typeof messageId !== "string" || !/^[a-zA-Z0-9-]{16,80}$/.test(messageId)) throwHttp(400, "A valid message id is required.");
+    const existing = await store.getMessage(sender.uid, messageId);
+    const respondExisting = (message) => {
+      if (message.originalText !== originalText || message.sourceLanguage !== sourceLanguage || message.recipientNumber !== VAANI_PREFIX + suffix) {
+        throwHttp(409, "This message id was already used for different content.");
+      }
+      return res.json({ message });
+    };
+    if (existing) return respondExisting(existing);
+    const number = await store.getNumber(suffix);
+    const recipient = number && await store.getUser(number.uid);
+    if (!recipient) throwHttp(404, "No user has that Vaani number yet.");
+    const targetLanguage = storedLanguage(recipient.messageLanguage || recipient.listenLanguage);
+    const translationStyle = targetLanguage !== "en" && recipient.messageTranslationStyle === "mixed" ? "mixed" : "pure";
+    let translatedText;
+    try {
+      translatedText = await translateMessage(originalText, sourceLanguage, targetLanguage, translationStyle);
+      if (typeof translatedText !== "string" || !translatedText.trim()) throw new Error("Empty translation");
+    } catch (_) {
+      throwHttp(503, "Translation is unavailable. Your message was not sent. Please retry.");
+    }
+    const message = { messageId, senderUid: sender.uid, recipientUid: recipient.uid,
+      senderNumber: sender.number, recipientNumber: recipient.number,
+      originalText, translatedText, sourceLanguage, targetLanguage, translationStyle, createdAt: nowIso() };
+    try { await store.createMessage(message); }
+    catch (error) {
+      if (error.status === 409 || error.statusCode === 409) {
+        return respondExisting(await store.getMessage(sender.uid, messageId));
+      }
+      throw error;
+    }
+    // Durable storage succeeds before notifying either device. Reconnection fetches history.
+    await Promise.allSettled([sender.uid, recipient.uid].map((uid) =>
+      sendRealtimeSignal(uid, { type: "new_message", message })));
+    res.status(201).json({ message });
+  } catch (error) { next(error); }
+});
+
 app.get("/api/calls/:callId", async (req, res, next) => {
   try {
     const user = await requireUser(req);
@@ -814,7 +977,7 @@ app.post("/api/calls/:callId/accept", async (req, res, next) => {
     const callId = cleanCallId(req.params.callId);
     const call = await getCallForParticipant(callId, user.uid);
     if (call.calleeUid !== user.uid) throwHttp(403, "Only the callee can accept this call.");
-    if (call.status !== "ringing") throwHttp(412, "This call is no longer ringing.");
+    if (call.status !== "ringing" || Date.parse(call.expiresAt) <= Date.now()) throwHttp(412, "This call is no longer ringing.");
 
     const updatedCall = await store.updateCall(callId, { status: "accepted", acceptedAt: nowIso() });
     notifyCallUpdate(updatedCall);
@@ -836,7 +999,8 @@ app.post("/api/calls/:callId/end", async (req, res, next) => {
   try {
     const user = await requireUser(req);
     const callId = cleanCallId(req.params.callId);
-    await getCallForParticipant(callId, user.uid);
+    const currentCall = await getCallForParticipant(callId, user.uid);
+    if (currentCall.endedAt) return res.json({ callId, status: currentCall.status });
     const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 40) : "ended";
     const updatedCall = await store.updateCall(callId, { status: "ended", endedBy: user.uid, endedReason: reason, endedAt: nowIso() });
     notifyCallUpdate(updatedCall);
@@ -872,23 +1036,30 @@ app.get("/api/calls/:callId/translation/status", async (req, res, next) => {
   }
 });
 
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "This service endpoint is unavailable. Please try again later." });
+});
+
 app.use((error, _req, res, _next) => {
   console.error(error);
   res.status(error.status || error.statusCode || 500).json({ error: error.message || "Internal error" });
 });
 
-store = createStore();
+export async function startBridge({ dataStore = createStore(), translator = createTextTranslator(SARVAM_API_KEY), port = PORT } = {}) {
+store = dataStore;
+translateMessage = translator;
 await store.init();
-const server = app.listen(PORT, () => {
-  console.log(`Vaani Setu bridge listening on ${PORT}`);
-});
+const server = app.listen(port);
+await new Promise((resolve) => server.once("listening", resolve));
 
 const wss = new WebSocketServer({ server, path: "/ws/calls" });
 wss.on("connection", async (socket, req) => {
   try {
     const url = new URL(req.url, "http://localhost");
     const token = url.searchParams.get("token") || "";
-    const claims = verifyUserToken(token);
+    const claims = jwt.verify(token, APP_JWT_SECRET, {
+      audience: ["vaani-setu-realtime", "vaani-setu-app"], issuer: "vaani-setu-azure",
+    });
     const user = await store.getUser(claims.sub);
     if (!user) throwHttp(401, "Unauthorized");
 
@@ -908,8 +1079,25 @@ wss.on("connection", async (socket, req) => {
       sockets.delete(socket);
       if (sockets.size === 0) onlineClients.delete(user.uid);
     });
+    // A call may arrive while the app is connecting or reconnecting.
+    // Recover only this recipient's still-ringing calls from durable storage.
+    const pending = await store.listCalls(user.uid);
+    for (const call of pending) {
+      if (socket.readyState !== 1) break;
+      if (call.calleeUid === user.uid && call.status === "ringing" && Date.parse(call.expiresAt) > Date.now()) {
+        socket.send(JSON.stringify(incomingCallPayload(call.callId, call)));
+      }
+    }
   } catch (error) {
     console.error("WebSocket auth failed", error);
     socket.close(1008, "Unauthorized");
   }
 });
+
+return { server, wss, store };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await startBridge();
+  console.log(`Vaani Setu bridge listening on ${PORT}`);
+}

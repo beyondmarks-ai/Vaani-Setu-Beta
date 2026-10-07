@@ -23,7 +23,7 @@ const MAX_TTS_CHARS = Number(process.env.TRANSLATION_MAX_TTS_CHARS || 260);
 const TRANSLATE_TIMEOUT_MS = Number(process.env.SARVAM_TRANSLATE_TIMEOUT_MS || 3000);
 const TTS_TIMEOUT_MS = Number(process.env.SARVAM_TTS_TIMEOUT_MS || 15000);
 const TTS_PING_MS = 25000;
-const TTS_STREAM_MIN_CHARS = 50;
+const INPUT_CHUNK_MS = 40;
 
 const LANGUAGE_LOCALES = {
   en: "en-IN",
@@ -33,7 +33,8 @@ const LANGUAGE_LOCALES = {
   kn: "kn-IN",
   ml: "ml-IN",
   mr: "mr-IN",
-  or: "or-IN",
+  // Sarvam's current STT, translation and Bulbul APIs use od-IN for Odia.
+  or: "od-IN",
   pa: "pa-IN",
   ta: "ta-IN",
   te: "te-IN",
@@ -172,8 +173,8 @@ async function createBotToken({ apiKey, apiSecret, roomName, identity }) {
   return token.toJwt();
 }
 
-class DirectionPipeline {
-  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, sarvamApiKey, shouldSuppressEcho, onOutput }) {
+export class DirectionPipeline {
+  constructor({ callId, label, sourceLanguage, targetLanguage: outputLanguage, voice, outputSource, sarvamApiKey, shouldSuppressEcho, onOutput, client, inputResampler, outputResampler }) {
     this.callId = callId;
     this.label = label;
     this.outputSource = outputSource;
@@ -183,9 +184,9 @@ class DirectionPipeline {
     this.sourceLanguage = code(sourceLanguage);
     this.targetLanguage = code(outputLanguage);
     this.voice = ttsSpeaker(voice);
-    this.client = new SarvamAIClient({ apiSubscriptionKey: sarvamApiKey });
-    this.inputResampler = new AudioResampler(LIVEKIT_RATE, SPEECH_INPUT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
-    this.outputResampler = new AudioResampler(TTS_OUTPUT_RATE, LIVEKIT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
+    this.client = client || new SarvamAIClient({ apiSubscriptionKey: sarvamApiKey });
+    this.inputResampler = inputResampler || new AudioResampler(LIVEKIT_RATE, SPEECH_INPUT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
+    this.outputResampler = outputResampler || new AudioResampler(TTS_OUTPUT_RATE, LIVEKIT_RATE, CHANNELS, AudioResamplerQuality.QUICK);
     this.sttSocket = null;
     this.ttsSocket = null;
     this.ttsPingTimer = null;
@@ -205,6 +206,15 @@ class DirectionPipeline {
     this.lastError = "";
     this.lastTranslationLatencyMs = 0;
     this.lastSttLatencyMs = 0;
+    this.lastSpeechEndedAt = 0;
+    this.lastTtsFirstAudioMs = 0;
+    this.lastTranscriptToAudioMs = 0;
+    this.lastSpeechEndToAudioMs = 0;
+    this.lastTranslationQueueMs = 0;
+    this.lastSynthesisQueueMs = 0;
+    this.pendingTranslations = 0;
+    this.pendingSynthesis = 0;
+    this.currentOutputTiming = null;
     this.processingChain = Promise.resolve();
     this.outputChain = Promise.resolve();
     this.ttsAudioChain = Promise.resolve();
@@ -251,14 +261,15 @@ class DirectionPipeline {
   async openTtsSocket() {
     clearInterval(this.ttsPingTimer);
     let configuredForConnection = false;
-    this.ttsSocket = await this.client.textToSpeechStreaming.connect({
+    const socket = await this.client.textToSpeechStreaming.connect({
       model: "bulbul:v3",
       send_completion_event: true,
       "Api-Subscription-Key": this.sarvamApiKey,
       reconnectAttempts: 8,
     });
+    this.ttsSocket = socket;
     this.ttsSocket.on("open", () => {
-      if (!this.active) return;
+      if (!this.active || this.ttsSocket !== socket) return;
       configuredForConnection = false;
       try {
         this.configureTtsSocket();
@@ -267,13 +278,16 @@ class DirectionPipeline {
         this.recordError("Sarvam TTS configuration", error);
       }
     });
-    this.ttsSocket.on("message", (message) => this.handleTtsMessage(message));
+    this.ttsSocket.on("message", (message) => {
+      if (this.ttsSocket === socket) this.handleTtsMessage(message);
+    });
     this.ttsSocket.on("close", (event) => {
-      if (!this.active) return;
+      if (!this.active || this.ttsSocket !== socket) return;
       this.lastError = `Sarvam TTS socket closed (${event.code || "unknown"})`;
       this.rejectCurrentTts(new Error(this.lastError));
     });
     this.ttsSocket.on("error", (error) => {
+      if (this.ttsSocket !== socket) return;
       this.recordError("Sarvam TTS", error);
       this.rejectCurrentTts(error);
     });
@@ -304,8 +318,8 @@ class DirectionPipeline {
           pace: Number(process.env.SARVAM_TTS_PACE || 1.05),
           speech_sample_rate: TTS_OUTPUT_RATE,
           output_audio_codec: "linear16",
-          min_buffer_size: 50,
-          max_chunk_length: 220,
+          min_buffer_size: 30,
+          max_chunk_length: 120,
         },
       }),
     );
@@ -315,7 +329,10 @@ class DirectionPipeline {
     if (!this.active || !message) return;
     if (message.type === "events") {
       if (message.data?.signal_type === "START_SPEECH") this.state = "recognizing";
-      if (message.data?.signal_type === "END_SPEECH") this.state = "transcribing";
+      if (message.data?.signal_type === "END_SPEECH") {
+        this.state = "transcribing";
+        this.lastSpeechEndedAt = Date.now();
+      }
       return;
     }
     if (message.type === "error") {
@@ -338,20 +355,25 @@ class DirectionPipeline {
     this.recognizedCount += 1;
     this.lastRecognizedAt = Date.now();
     this.lastSourceText = sourceText;
+    const timing = { recognizedAt: this.lastRecognizedAt, speechEndedAt: this.lastSpeechEndedAt };
+    this.pendingTranslations += 1;
     this.processingChain = this.processingChain
       .then(async () => {
         if (!this.active) return;
         this.state = "translating";
         const startedAt = Date.now();
+        this.lastTranslationQueueMs = startedAt - timing.recognizedAt;
+        timing.translationQueueMs = this.lastTranslationQueueMs;
         const translated = await this.translateTranscript(sourceText);
         if (!this.active || !isUsefulText(translated)) return;
         this.lastTranslationLatencyMs = Date.now() - startedAt;
         this.lastTranslatedText = translated;
-        this.queueSynthesis(translated);
+        this.queueSynthesis(translated, timing);
       })
       .catch((error) => {
         this.recordError("Sarvam translation", error);
-      });
+      })
+      .finally(() => { this.pendingTranslations -= 1; });
   }
 
   async translateOnce(input, sourceLanguage, targetLanguage) {
@@ -362,7 +384,7 @@ class DirectionPipeline {
       mode: "modern-colloquial",
       model: "mayura:v1",
       numerals_format: "international",
-    });
+    }, { timeoutInSeconds: TRANSLATE_TIMEOUT_MS / 1000, maxRetries: 0 });
     const response = await withTimeout(request, TRANSLATE_TIMEOUT_MS, "Sarvam translation");
     return trimForSpeech(response?.translated_text);
   }
@@ -386,7 +408,7 @@ class DirectionPipeline {
       for (const resampled of resampledFrames) {
         this.pendingInput = Buffer.concat([this.pendingInput, pcmBuffer(resampled.data)]);
       }
-      const chunkBytes = Math.floor((SPEECH_INPUT_RATE * 2) / 10);
+      const chunkBytes = Math.floor(SPEECH_INPUT_RATE * 2 * INPUT_CHUNK_MS / 1000);
       while (this.pendingInput.length >= chunkBytes) {
         const chunk = this.pendingInput.subarray(0, chunkBytes);
         this.pendingInput = this.pendingInput.subarray(chunkBytes);
@@ -404,8 +426,9 @@ class DirectionPipeline {
   }
 
   handleTtsMessage(message) {
-    if (!message) return;
+    if (!this.active || !message || !this.currentTts) return;
     if (message.type === "audio" && message.data?.audio) {
+      this.currentTts.receivedAudio = true;
       const audio = Buffer.from(message.data.audio, "base64");
       this.ttsAudioChain = this.ttsAudioChain
         .catch(() => {})
@@ -415,13 +438,13 @@ class DirectionPipeline {
     if (message.type === "event" && message.data?.event_type === "final") {
       const current = this.currentTts;
       if (!current) return;
-      this.ttsAudioChain
+      this.ttsAudioChain = this.ttsAudioChain
         .then(async () => {
           for (const frame of this.outputResampler.flush()) {
-            await this.outputSource.captureFrame(frame);
-            this.outputFrames += 1;
+            await this.publishOutputFrame(frame);
           }
-          current.resolve();
+          if (!current.receivedAudio) current.reject(new Error("Sarvam TTS returned no audio."));
+          else current.resolve();
         })
         .catch(current.reject);
       return;
@@ -438,9 +461,24 @@ class DirectionPipeline {
     if (!pcm.length) return;
     const samples = bufferToPcm16(pcm);
     for (const frame of this.outputResampler.push(makeFrame(samples, TTS_OUTPUT_RATE))) {
-      await this.outputSource.captureFrame(frame);
-      this.outputFrames += 1;
+      await this.publishOutputFrame(frame);
     }
+  }
+
+  async publishOutputFrame(frame) {
+    if (!this.active) return;
+    await this.outputSource.captureFrame(frame);
+    this.outputFrames += 1;
+    const timing = this.currentOutputTiming;
+    if (!timing || timing.firstAudioAt) return;
+    timing.firstAudioAt = Date.now();
+    this.lastTtsFirstAudioMs = timing.firstAudioAt - timing.synthesisStartedAt;
+    this.lastTranscriptToAudioMs = timing.firstAudioAt - timing.recognizedAt;
+    this.lastSpeechEndToAudioMs = timing.speechEndedAt ? timing.firstAudioAt - timing.speechEndedAt : 0;
+    console.log(JSON.stringify({ event: "speech_latency", callId: this.callId, direction: this.label,
+      ttsFirstAudioMs: this.lastTtsFirstAudioMs, transcriptToAudioMs: this.lastTranscriptToAudioMs,
+      speechEndToAudioMs: this.lastSpeechEndToAudioMs,
+      translationQueueMs: timing.translationQueueMs || 0, synthesisQueueMs: timing.synthesisQueueMs || 0 }));
   }
 
   async synthesizeShort(text) {
@@ -454,7 +492,7 @@ class DirectionPipeline {
         model: "bulbul:v3",
         output_audio_codec: "wav",
         temperature: Number(process.env.SARVAM_TTS_TEMPERATURE || 0.6),
-      }),
+      }, { timeoutInSeconds: TTS_TIMEOUT_MS / 1000, maxRetries: 0 }),
       TTS_TIMEOUT_MS,
       "Sarvam short TTS",
     );
@@ -466,8 +504,7 @@ class DirectionPipeline {
       await this.captureTtsAudio(Buffer.from(encoded, "base64"));
     }
     for (const frame of this.outputResampler.flush()) {
-      await this.outputSource.captureFrame(frame);
-      this.outputFrames += 1;
+      await this.publishOutputFrame(frame);
     }
   }
 
@@ -476,35 +513,32 @@ class DirectionPipeline {
     if (current) current.reject(error instanceof Error ? error : new Error(String(error)));
   }
 
-  async synthesize(text) {
+  async synthesize(text, timing = { recognizedAt: Date.now() }) {
     if (!this.active) return;
     this.state = "synthesizing";
     this.onOutput?.(text);
-    if (Array.from(text).length < TTS_STREAM_MIN_CHARS) {
-      await this.synthesizeShort(text);
-      this.synthesizedCount += 1;
-      this.lastOutputAt = Date.now();
-      if (this.active) this.state = "listening";
-      return;
-    }
-    if (!this.ttsSocket) await this.openTtsSocket();
-    if (this.ttsSocket?.readyState !== 1) {
-      await withTimeout(this.ttsSocket.waitForOpen(), 5000, "Sarvam TTS reconnect");
-    }
-    if (this.ttsSocket?.readyState !== 1) throw new Error("Sarvam TTS socket is not connected.");
+    this.currentOutputTiming = { ...timing, synthesisStartedAt: Date.now(), firstAudioAt: 0 };
+    const framesBefore = this.outputFrames;
     try {
+      if (!this.ttsSocket) await this.openTtsSocket();
+      if (this.ttsSocket?.readyState !== 1) {
+        await withTimeout(this.ttsSocket.waitForOpen(), 5000, "Sarvam TTS reconnect");
+      }
+      if (this.ttsSocket?.readyState !== 1) throw new Error("Sarvam TTS socket is not connected.");
       await withTimeout(
         new Promise((resolve, reject) => {
-          this.currentTts = {
+          const current = {
+            receivedAudio: false,
             resolve: () => {
-              this.currentTts = null;
+              if (this.currentTts === current) this.currentTts = null;
               resolve();
             },
             reject: (error) => {
-              this.currentTts = null;
+              if (this.currentTts === current) this.currentTts = null;
               reject(error);
             },
           };
+          this.currentTts = current;
           this.ttsSocket.convert(text);
           this.ttsSocket.flush();
         }),
@@ -513,23 +547,35 @@ class DirectionPipeline {
       );
     } catch (error) {
       this.currentTts = null;
+      const failedSocket = this.ttsSocket;
+      this.ttsSocket = null;
       try {
-        this.ttsSocket?.close();
+        failedSocket?.close();
       } catch (_) {
         // Recreate the socket before the next utterance.
       }
-      this.ttsSocket = null;
-      throw error;
+      // Preserve order and never replay an utterance after any audio was sent.
+      await this.ttsAudioChain.catch(() => {});
+      if (!this.active || this.outputFrames !== framesBefore) throw error;
+      await this.synthesizeShort(text);
+    } finally {
+      this.currentOutputTiming = null;
     }
     this.synthesizedCount += 1;
     this.lastOutputAt = Date.now();
     if (this.active) this.state = "listening";
   }
 
-  queueSynthesis(text) {
+  queueSynthesis(text, timing = { recognizedAt: Date.now() }) {
+    const queuedAt = Date.now();
+    this.pendingSynthesis += 1;
     this.outputChain = this.outputChain
-      .then(() => this.synthesize(text))
-      .catch((error) => this.recordError("Sarvam TTS", error));
+      .then(() => {
+        this.lastSynthesisQueueMs = Date.now() - queuedAt;
+        return this.synthesize(text, { ...timing, synthesisQueueMs: this.lastSynthesisQueueMs });
+      })
+      .catch((error) => this.recordError("Sarvam TTS", error))
+      .finally(() => { this.pendingSynthesis -= 1; });
   }
 
   recordError(stage, error) {
@@ -579,6 +625,13 @@ class DirectionPipeline {
       lastTranslatedText: this.lastTranslatedText,
       lastSttLatencyMs: this.lastSttLatencyMs,
       lastTranslationLatencyMs: this.lastTranslationLatencyMs,
+      lastTtsFirstAudioMs: this.lastTtsFirstAudioMs,
+      lastTranscriptToAudioMs: this.lastTranscriptToAudioMs,
+      lastSpeechEndToAudioMs: this.lastSpeechEndToAudioMs,
+      lastTranslationQueueMs: this.lastTranslationQueueMs,
+      lastSynthesisQueueMs: this.lastSynthesisQueueMs,
+      pendingTranslations: this.pendingTranslations,
+      pendingSynthesis: this.pendingSynthesis,
       lastError: this.lastError,
     };
   }

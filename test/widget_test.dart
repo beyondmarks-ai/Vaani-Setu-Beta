@@ -1,19 +1,21 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:vaani_setu/main.dart';
+import 'package:flutter/material.dart';
+import 'package:vaani_setu/screens/login_screen.dart';
 
 void main() {
-  testWidgets('dialer accepts digits', (WidgetTester tester) async {
-    await tester.pumpWidget(const VaaniSetuApp());
+  testWidgets('login screen switches to account creation', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const MaterialApp(home: LoginScreen()));
 
     expect(find.text('Vaani Setu'), findsOneWidget);
-    expect(find.text('Enter phone number'), findsOneWidget);
+    expect(find.text('Sign in to continue'), findsOneWidget);
 
-    await tester.tap(find.text('1'));
-    await tester.tap(find.text('2'));
-    await tester.tap(find.text('3'));
+    await tester.tap(find.text('New user? Create account'));
     await tester.pump();
 
-    expect(find.text('123'), findsOneWidget);
+    expect(find.text('Create your account'), findsOneWidget);
+    expect(find.text('Create account'), findsOneWidget);
   });
 }

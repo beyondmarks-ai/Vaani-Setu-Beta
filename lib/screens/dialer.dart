@@ -6,6 +6,7 @@ import '../services/call_service.dart';
 import '../services/number_assignment_service.dart';
 import '../services/translation_options.dart';
 import 'call_screen.dart';
+import 'history_screen.dart';
 
 class DialerScreen extends StatefulWidget {
   const DialerScreen({super.key, required this.profile});
@@ -397,6 +398,25 @@ class _DialerScreenState extends State<DialerScreen> {
       appBar: AppBar(
         title: const Text('Vaani Setu'),
         actions: [
+          IconButton(
+            tooltip: 'Messages',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => HistoryScreen(profile: _profile),
+              ),
+            ),
+            icon: const Icon(Icons.chat_bubble_outline),
+          ),
+          IconButton(
+            tooltip: 'Call history',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) =>
+                    HistoryScreen(profile: _profile, showCalls: true),
+              ),
+            ),
+            icon: const Icon(Icons.history),
+          ),
           IconButton(
             tooltip: 'Translation preferences',
             onPressed: _openTranslationSettings,

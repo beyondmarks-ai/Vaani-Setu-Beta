@@ -9,10 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
-import '../screens/incoming_call_screen.dart';
 import 'azure_auth_service.dart';
 import 'call_event_service.dart';
 import 'call_service.dart';
+import 'history_service.dart';
+import 'incoming_call_presenter.dart';
 
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -41,21 +42,27 @@ class NotificationService with WidgetsBindingObserver {
   static const _bridgeUrl = String.fromEnvironment(
     'BRIDGE_URL',
     defaultValue:
-        'https://vaani-setu-bridge.wonderfulplant-f827f144.southindia.azurecontainerapps.io',
+        'https://vaani-setu-bridge.happycoast-2d2c0fea.centralindia.azurecontainerapps.io',
   );
 
   GlobalKey<NavigatorState>? _navigatorKey;
+  IncomingCallPresenter? _incomingPresenter;
   String? _currentUid;
   bool _initialized = false;
   bool _signalStopped = true;
   VaaniCall? _pendingCall;
   WebSocket? _signalSocket;
   Timer? _signalReconnectTimer;
-  final Set<String> _presentedCallIds = <String>{};
+  bool _signalConnecting = false;
+  int _signalGeneration = 0;
   StreamSubscription<String>? _tokenRefreshSubscription;
 
   Future<void> initialize(GlobalKey<NavigatorState> navigatorKey) async {
     _navigatorKey = navigatorKey;
+    _incomingPresenter ??= IncomingCallPresenter(
+      navigatorKey,
+      () => _currentUid,
+    );
     if (_initialized) return;
     _initialized = true;
     WidgetsBinding.instance.addObserver(this);
@@ -80,15 +87,16 @@ class NotificationService with WidgetsBindingObserver {
 
   Future<void> attachUser(String uid) async {
     if (_currentUid == uid) {
-      await _syncTokenSafely();
       _startRealtimeSignal();
+      unawaited(_syncTokenSafely());
       await _flushPendingCall();
       return;
     }
 
+    if (_currentUid != null) await detachUser();
     _currentUid = uid;
-    await _syncTokenSafely();
     _startRealtimeSignal();
+    unawaited(_syncTokenSafely());
     await _flushPendingCall();
   }
 
@@ -109,6 +117,8 @@ class NotificationService with WidgetsBindingObserver {
     _currentUid = null;
     _pendingCall = null;
     _signalStopped = true;
+    _signalGeneration++;
+    _signalConnecting = false;
     _signalReconnectTimer?.cancel();
     _signalReconnectTimer = null;
     await _signalSocket?.close();
@@ -169,7 +179,7 @@ class NotificationService with WidgetsBindingObserver {
     if (!Platform.isAndroid) return;
 
     const androidSettings = AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
+      '@drawable/ic_launcher',
     );
     await _localNotifications.initialize(
       settings: const InitializationSettings(android: androidSettings),
@@ -208,7 +218,12 @@ class NotificationService with WidgetsBindingObserver {
   }
 
   Future<void> _syncToken() async {
-    final token = await _messaging.getToken();
+    final uid = _currentUid;
+    if (uid == null) return;
+    final token = await _messaging.getToken().timeout(
+      const Duration(seconds: 10),
+    );
+    if (_currentUid != uid) return;
     if (token == null || token.isEmpty) return;
     await _writePushToken(token);
 
@@ -217,6 +232,7 @@ class NotificationService with WidgetsBindingObserver {
       freshToken,
     ) async {
       try {
+        if (_currentUid != uid) return;
         await _writePushToken(freshToken);
       } catch (error) {
         debugPrint('Push token refresh failed: $error');
@@ -238,7 +254,9 @@ class NotificationService with WidgetsBindingObserver {
   }
 
   Future<void> _connectRealtimeSignal() async {
-    if (_signalStopped || _signalSocket != null) return;
+    if (_signalStopped || _signalSocket != null || _signalConnecting) return;
+    _signalConnecting = true;
+    final generation = _signalGeneration;
 
     try {
       final tokenBody = await AzureAuthService.instance.authorizedPost(
@@ -247,27 +265,42 @@ class NotificationService with WidgetsBindingObserver {
       );
       final socketUrl = tokenBody['url'] as String? ?? '';
       if (socketUrl.isEmpty) throw StateError('Realtime token missing.');
+      if (_signalStopped || generation != _signalGeneration) return;
 
       final socket = await WebSocket.connect(socketUrl);
+      if (_signalStopped || generation != _signalGeneration) {
+        await socket.close();
+        return;
+      }
       socket.pingInterval = const Duration(seconds: 20);
       _signalSocket = socket;
       socket.listen(
         _handleSignalMessage,
-        onDone: _handleSignalClosed,
-        onError: (_) => _handleSignalClosed(),
+        onDone: () {
+          if (identical(_signalSocket, socket)) _handleSignalClosed();
+        },
+        onError: (_) {
+          if (identical(_signalSocket, socket)) _handleSignalClosed();
+        },
         cancelOnError: true,
       );
     } catch (error) {
       debugPrint('Call signal connection failed: $error');
-      _handleSignalClosed();
+      if (generation == _signalGeneration) _handleSignalClosed();
+    } finally {
+      if (generation == _signalGeneration) _signalConnecting = false;
     }
   }
 
   void _handleSignalMessage(dynamic message) {
     if (message is! String) return;
 
-    final decoded = jsonDecode(message);
-    final data = _signalDataFromDecoded(decoded);
+    Map<String, dynamic>? data;
+    try {
+      data = _signalDataFromDecoded(jsonDecode(message));
+    } on FormatException {
+      return;
+    }
     if (data == null || data['type'] == 'ready') return;
 
     if (_isExpired(data)) return;
@@ -312,11 +345,15 @@ class NotificationService with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _currentUid != null) {
       _startRealtimeSignal();
+      unawaited(_flushPendingCall());
     }
   }
 
   VaaniCall? _callFromData(Map<String, dynamic> data) {
     final type = data['type'];
+    if (type == 'new_message' || type == 'call_update') {
+      HistoryService.changes.add(null);
+    }
     if (type != 'incoming_call' && type != 'call_update') return null;
     final callId = data['callId'] as String? ?? '';
     if (callId.isEmpty) return null;
@@ -379,26 +416,13 @@ class NotificationService with WidgetsBindingObserver {
   }
 
   Future<void> _showIncomingCall(VaaniCall call) async {
-    if (_presentedCallIds.contains(call.id)) return;
-    _presentedCallIds.add(call.id);
-
-    final navigator = _navigatorKey?.currentState;
-    if (navigator == null) {
-      _pendingCall = call;
-      _presentedCallIds.remove(call.id);
+    if (call.status != 'ringing' || _isExpired({'expiresAt': call.expiresAt})) {
       return;
     }
-
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      navigator
-          .push(
-            MaterialPageRoute<void>(
-              builder: (_) => IncomingCallScreen(call: call),
-            ),
-          )
-          .then((_) {
-            _presentedCallIds.remove(call.id);
-          });
-    });
+    if (_currentUid == null || _navigatorKey?.currentState == null) {
+      _pendingCall = call;
+      return;
+    }
+    _incomingPresenter?.show(call);
   }
 }

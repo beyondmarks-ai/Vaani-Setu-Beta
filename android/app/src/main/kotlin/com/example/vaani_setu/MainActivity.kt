@@ -22,6 +22,10 @@ class MainActivity : FlutterActivity() {
                     result.success(latestIncomingCall ?: incomingCallFromIntent(intent))
                     latestIncomingCall = null
                 }
+                "cancelIncomingCall" -> {
+                    cancelIncomingCall(call.argument<String>("callId") ?: "")
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
